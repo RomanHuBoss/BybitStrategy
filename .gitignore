@@ -1,0 +1,5 @@
+/historical_data/
+/.venv/
+/__pycache__/
+*.log
+*.csv
