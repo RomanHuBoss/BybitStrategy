@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 from services.get_bybit_candles import get_bybit_candles
+from services.bybit_candles_handlers import bybit_candles_to_csv
 
 """
 Эта балалайка запрашивает с биржи Bybit данные о торговле конкретной криптовалютной парой с текущего момента времени и до момента в прошлом, определяемого
@@ -14,6 +15,7 @@ from services.get_bybit_candles import get_bybit_candles
         symbol (строка) - торговый символ
         timeframe - таймфрейм (1, 5, 15 минут и т.д.)
         candles_num (целое число) - количество свечей
+        save_to_csv (boolean) - надо ли скачанную инфу сохранить в csv-файле в папке downloads
     Валидация параметров:
         Если параметры не соответствуют бизнес-правилам (например, слишком длинный символ), возвращается ошибка 400 с деталями
     Успешный ответ:
@@ -47,8 +49,11 @@ class ErrorResponse(BaseModel):
     404: {"description": "Not found"},
 })
 
-async def get_prognosis(symbol: str, timeframe: int, candles_num: int):
+async def get_prognosis(symbol: str, timeframe: int, candles_num: int, save_to_csv: Optional[bool] = False):
     bybit_data = get_bybit_candles(symbol, timeframe, candles_num)
+
+    if save_to_csv:
+        bybit_candles_to_csv(bybit_data)
 
     return bybit_data
 
@@ -57,7 +62,7 @@ async def get_prognosis(symbol: str, timeframe: int, candles_num: int):
 async def handle_unsupported_paths(path: str):
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail="Некорректный запрос"
+        detail="Некорректный запрос. Используй /prognosis/"
     )
 
 if __name__ == "__main__":

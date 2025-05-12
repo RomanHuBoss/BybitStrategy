@@ -33,13 +33,18 @@ def get_bybit_candles(symbol: str, timeframe: int, candles_num: int):
     try:
         session = HTTP(testnet=False)
 
-        return session.get_kline(
+        bybit_data = session.get_kline(
             category="linear",
             symbol=symbol,
             interval=timeframe,
             start=round(time.time() * 1000) - timeframe * candles_num * 60 * 1000,
             end=round(time.time() * 1000),
         )
+        bybit_data['candles_num'] = candles_num
+        bybit_data['timeframe'] = timeframe
+
+        return bybit_data
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
