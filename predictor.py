@@ -286,7 +286,7 @@ print("Информация о модели:", predictor.get_model_info())
 
 
 # Пример 2: Обработка CSV-файла
-csv_file = "BTCUSDT_1m_2025-05-12-22-19.csv"
+csv_file = "BTCUSDT_1m_2025-05-12-22-48.csv"
 if os.path.exists(csv_file):
     print(f"\nОбработка файла {csv_file}...")
 
