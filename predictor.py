@@ -11,8 +11,6 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import load_model
 from typing import Dict, Any, List, Optional, Generator
 
-TRAINING_CONFIG = None
-
 class CryptoModelPredictor:
     def __init__(self, model_folder: str):
         """
@@ -22,7 +20,7 @@ class CryptoModelPredictor:
             model_folder: Путь к папке с сохраненной моделью и файлами конфигурации.
         """
         self.model = None
-        self.scaler = None
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
         self.training_config = None
         self.required_raw_columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
         self.load_model(model_folder)
@@ -43,18 +41,16 @@ class CryptoModelPredictor:
         scaler_scale_path = os.path.join(model_folder, 'scaler_scale.npy')
         if not (os.path.exists(scaler_min_path) and os.path.exists(scaler_scale_path)):
             raise ValueError("Не найдены файлы scaler")
+
         self.scaler.min_ = np.load(scaler_min_path)
         self.scaler.scale_ = np.load(scaler_scale_path)
 
-        global TRAINING_CONFIG
-        with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
-            TRAINING_CONFIG = pickle.load(f)
+        training_config_path = os.path.join(model_folder, 'training_config.pkl')
+        if not os.path.exists(training_config_path):
+            raise ValueError(f"Не найден файл с конфигурацией модели: {training_config_path}")
 
-        # Загрузка percentage_pairs
-        pairs_path = os.path.join(model_folder, 'percentage_pairs.npy')
-        if not os.path.exists(pairs_path):
-            raise ValueError(f"Не найден файл с парами sl/tp: {pairs_path}")
-        self.percentage_pairs = np.load(pairs_path, allow_pickle=True)
+        with open(training_config_path, 'rb') as f:
+            self.training_config = pickle.load(f)
 
         # Загрузка feature_columns
         features_path = os.path.join(model_folder, 'feature_columns.json')
@@ -93,7 +89,7 @@ class CryptoModelPredictor:
             df.drop(['day_of_week', 'month', 'hour'], axis=1, inplace=True)
 
         # 2. Добавляем технические индикаторы
-        windows = np.arange(10, TRAINING_CONFIG['backward_window'], 10)
+        windows = np.arange(10, self.training_config['backward_window'], 10)
 
         for window in windows:
             # Скользящие средние
@@ -129,8 +125,6 @@ class CryptoModelPredictor:
         if self.feature_columns:
             df = df[self.feature_columns]
 
-        df = df.tail(30)
-
         return df.dropna()
 
     def predict(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -152,7 +146,7 @@ class CryptoModelPredictor:
             raise ValueError(f"Отсутствуют фичи: {missing_features}")
 
         # Подготавливаем данные для модели
-        input_array = np.array([processed_data[feature][-TRAINING_CONFIG['backward_window']:] for feature in self.feature_columns]).T
+        input_array = np.array([processed_data[feature][-self.training_config['backward_window']:] for feature in self.feature_columns]).T
         scaled_input = self.scaler.transform(input_array)
 
         # Делаем прогноз
@@ -160,7 +154,7 @@ class CryptoModelPredictor:
 
         # Форматируем результат
         result = {'long': {}, 'short': {}}
-        for i, (sl, tp) in enumerate(self.percentage_pairs):
+        for i, (sl, tp) in enumerate(self.training_config['percentage_pairs']):
             sl_key = f"sl_{sl:.4f}_tp_{tp:.4f}"
             result['long'][sl_key] = float(predictions[0, 0, i])
             result['short'][sl_key] = float(predictions[0, 1, i])
@@ -197,7 +191,7 @@ class CryptoModelPredictor:
         return {
             'feature_columns': self.feature_columns,
             'percentage_pairs': [{'sl': float(sl), 'tp': float(tp)}
-                                 for sl, tp in self.percentage_pairs],
+                                 for sl, tp in self.training_config['percentage_pairs']],
             'input_shape': self.model.input_shape[1:] if self.model else None,
             'required_raw_columns': self.required_raw_columns
         }
@@ -207,7 +201,7 @@ class CryptoModelPredictor:
         Упрощенный метод для получения последнего прогноза (без хранения состояния)
 
         Args:
-            raw_data: Словарь с историей свечей (минимум TRAINING_CONFIG['backward_window'])
+            raw_data: Словарь с историей свечей (минимум self.training_config['backward_window'])
 
         Returns:
             Последний прогноз для всех пар sl/tp
@@ -248,13 +242,13 @@ class CryptoModelPredictor:
             for col in required_columns:
                 data_buffer[col].append(row[col])
 
-            # Удаляем старые данные, если буфер превышает TRAINING_CONFIG['backward_window'] свечей
+            # Удаляем старые данные, если буфер превышает self.training_config['backward_window'] свечей
             for col in required_columns:
-                if len(data_buffer[col]) > TRAINING_CONFIG['backward_window']:
-                    data_buffer[col] = data_buffer[col][-TRAINING_CONFIG['backward_window']:]
+                if len(data_buffer[col]) > self.training_config['backward_window']:
+                    data_buffer[col] = data_buffer[col][-self.training_config['backward_window']:]
 
             # Когда накопилось достаточно данных, делаем прогноз
-            if len(data_buffer['open_time']) == TRAINING_CONFIG['backward_window']:
+            if len(data_buffer['open_time']) == self.training_config['backward_window']:
                 try:
                     predictions = self.prepare_and_predict(data_buffer)
                     yield {
@@ -268,7 +262,7 @@ class CryptoModelPredictor:
 
 
 # Инициализация прогнозировщика
-predictor = CryptoModelPredictor("models/12-05-2025 04-55-55")
+predictor = CryptoModelPredictor("models/13-05-2025 23-37-34")
 
 # Получение информации о модели
 print("Информация о модели:", predictor.get_model_info())
