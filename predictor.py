@@ -1,3 +1,4 @@
+import pickle
 import os
 import json
 import numpy as np
@@ -10,22 +11,7 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import load_model
 from typing import Dict, Any, List, Optional, Generator
 
-TRAINING_CONFIG = {
-    'epochs': 4, # число эпох обучения
-    'stop_loss_levels': np.arange(0.001, 0.02, 0.001), # уровни стоп-лосса (x100 - получим % от текущей цены)
-    'take_profit_multipliers': np.arange(2, 6, 1), # множители для уровней тейк-профит (x100 - получим % от текущей цены)
-    'scaler':  MinMaxScaler(feature_range=(0, 1)),
-    'backward_window': 30, # кол-во свечей, предшествующих текущей, для анализа ретроспективы
-    'forward_window': 120, # кол-во свечей, следующих за текущей, для прогноза динамики развития цены
-}
-
-TRAINING_CONFIG['percentage_pairs'] = [
-    (sl, sl * multiplier)
-    for sl in TRAINING_CONFIG['stop_loss_levels']
-    for multiplier in TRAINING_CONFIG['take_profit_multipliers']
-]
-
-
+TRAINING_CONFIG = None
 
 class CryptoModelPredictor:
     def __init__(self, model_folder: str):
@@ -36,11 +22,9 @@ class CryptoModelPredictor:
             model_folder: Путь к папке с сохраненной моделью и файлами конфигурации.
         """
         self.model = None
-        self.scaler = MinMaxScaler(feature_range=(0, 1))
-        self.percentage_pairs = None
-        self.feature_columns = None
+        self.scaler = None
+        self.training_config = None
         self.required_raw_columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
-
         self.load_model(model_folder)
 
     def load_model(self, model_folder: str) -> None:
@@ -61,6 +45,10 @@ class CryptoModelPredictor:
             raise ValueError("Не найдены файлы scaler")
         self.scaler.min_ = np.load(scaler_min_path)
         self.scaler.scale_ = np.load(scaler_scale_path)
+
+        global TRAINING_CONFIG
+        with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
+            TRAINING_CONFIG = pickle.load(f)
 
         # Загрузка percentage_pairs
         pairs_path = os.path.join(model_folder, 'percentage_pairs.npy')
@@ -127,8 +115,6 @@ class CryptoModelPredictor:
         df['macd_signal'] = macd.macd_signal().fillna(0)
         df['macd_diff'] = macd.macd_diff().fillna(0)
 
-
-
         # OBV
         df['obv'] = OnBalanceVolumeIndicator(
             close=df['close'],
@@ -142,6 +128,9 @@ class CryptoModelPredictor:
         df = df.bfill().ffill()
         if self.feature_columns:
             df = df[self.feature_columns]
+
+        df = df.tail(30)
+
         return df.dropna()
 
     def predict(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -249,7 +238,7 @@ class CryptoModelPredictor:
         df['open_time'] = df['open_time'].astype(int)
 
         # Сортируем по времени (на всякий случай)
-        df = df.sort_values('open_time')
+        df = df.sort_values(by='open_time', ascending=True).reset_index(drop=True)
 
         # Накопленный буфер данных
         data_buffer = {col: [] for col in required_columns}
@@ -286,7 +275,7 @@ print("Информация о модели:", predictor.get_model_info())
 
 
 # Пример 2: Обработка CSV-файла
-csv_file = "BTCUSDT_1m_2025-05-12-22-48.csv"
+csv_file = "BTCUSDT_1m_2025-05-13-18-28.csv"
 if os.path.exists(csv_file):
     print(f"\nОбработка файла {csv_file}...")
 

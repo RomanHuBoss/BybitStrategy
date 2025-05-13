@@ -20,6 +20,9 @@ def bybit_candles_to_df(json_data):
     df = pd.DataFrame(data_list, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
     df.drop('turnover', axis=1, inplace=True)
 
+    # Сортируем по времени (на всякий случай)
+    df = df.sort_values(by='open_time', ascending=True).reset_index(drop=True)
+
     # Преобразуем типы данных
     df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
 

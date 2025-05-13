@@ -2,8 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import json
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pickle
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator, EMAIndicator
@@ -15,33 +14,17 @@ from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalizat
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.optimizers import Adam
 from datetime import datetime
-import warnings
 from typing import Optional, Tuple, List, Dict, Any
+from training_config import TRAINING_CONFIG
+import warnings
 
 #warnings.filterwarnings('ignore')
 
-TRAINING_CONFIG = {
-    'epochs': 100, # число эпох обучения
-    'stop_loss_levels': np.arange(0.001, 0.02, 0.001), # уровни стоп-лосса (x100 - получим % от текущей цены)
-    'take_profit_multipliers': np.arange(2, 6, 1), # множители для уровней тейк-профит (x100 - получим % от текущей цены)
-    'scaler':  MinMaxScaler(feature_range=(0, 1)),
-    'backward_window': 30, # кол-во свечей, предшествующих текущей, для анализа ретроспективы
-    'forward_window': 120, # кол-во свечей, следующих за текущей, для прогноза динамики развития цены
-}
-
-TRAINING_CONFIG['percentage_pairs'] = [
-    (sl, sl * multiplier)
-    for sl in TRAINING_CONFIG['stop_loss_levels']
-    for multiplier in TRAINING_CONFIG['take_profit_multipliers']
-]
-
-class CryptoDataProcessor:
-    def __init__(self, training_config):
+class CryptoModelTrainer:
+    def __init__(self):
         self.df = None
-        self.training_config = training_config
         self.model = None
         self.scaler = MinMaxScaler(feature_range=(0, 1))
-        self.features_names = []
         self.feature_columns = None
 
     # Основные методы для работы с внутренним датафреймом
@@ -86,7 +69,7 @@ class CryptoDataProcessor:
 
     def _add_technical_indicators_to_df(self) -> None:
         """Добавление технических индикаторов к внутреннему датафрейму"""
-        windows = np.arange(10, self.training_config['backward_window'], 10)
+        windows = np.arange(10, TRAINING_CONFIG['backward_window'], 10)
 
         for window in windows:
             self.df[f'sma_{window}'] = SMAIndicator(close=self.df['close'], window=window).sma_indicator()
@@ -118,18 +101,18 @@ class CryptoDataProcessor:
 
     def _analyze_price_movements_on_df(self) -> None:
         """Анализ ценовых движений на внутреннем датафрейме"""
-        if len(self.df) < self.training_config['forward_window']:
+        if len(self.df) < TRAINING_CONFIG['forward_window']:
             raise ValueError(
-                f"Недостаточно данных для анализа. Требуется минимум {self.training_config['forward_window']} свечей, доступно {len(self.df)}")
+                f"Недостаточно данных для анализа. Требуется минимум {TRAINING_CONFIG['forward_window']} свечей, доступно {len(self.df)}")
 
         close_prices = self.df['close'].values
-        max_analysis_index = len(close_prices) - self.training_config['forward_window']
+        max_analysis_index = len(close_prices) - TRAINING_CONFIG['forward_window']
 
         # Создаем словарь для новых столбцов
         new_columns = {}
 
         # Инициализируем все новые столбцы нулями
-        for sl_pct, tp_pct in self.training_config['percentage_pairs']:
+        for sl_pct, tp_pct in TRAINING_CONFIG['percentage_pairs']:
             new_columns[f'long_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'] = np.zeros(len(self.df))
             new_columns[f'short_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'] = np.zeros(len(self.df))
 
@@ -138,13 +121,13 @@ class CryptoDataProcessor:
         self.df = pd.concat([self.df, new_columns_df], axis=1)
 
         # Теперь заполняем значения
-        for sl_pct, tp_pct in self.training_config['percentage_pairs']:
+        for sl_pct, tp_pct in TRAINING_CONFIG['percentage_pairs']:
             long_col = f'long_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'
             short_col = f'short_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'
 
             for i in range(max_analysis_index):
                 current_price = close_prices[i]
-                next_prices = close_prices[i + 1:i + self.training_config['forward_window'] + 1]
+                next_prices = close_prices[i + 1:i + TRAINING_CONFIG['forward_window'] + 1]
 
                 # LONG позиция
                 long_tp = current_price * (1 + tp_pct)
@@ -175,7 +158,7 @@ class CryptoDataProcessor:
         """Подготовка данных для обучения"""
 
         # сколько свечей нужно для обучения
-        data_size_needed_to_work = self.training_config['backward_window'] + self.training_config['forward_window']
+        data_size_needed_to_work = TRAINING_CONFIG['backward_window'] + TRAINING_CONFIG['forward_window']
 
         if len(self.df) < data_size_needed_to_work:
             raise ValueError(f"Нужно минимум {data_size_needed_to_work} строк, доступно {len(self.df)}")
@@ -194,17 +177,17 @@ class CryptoDataProcessor:
         # Создание последовательностей
         X, y_long, y_short = [], [], []
         for i in range(len(self.df) - data_size_needed_to_work):
-            X.append(scaled_data[i:i + self.training_config['backward_window']])
+            X.append(scaled_data[i:i + TRAINING_CONFIG['backward_window']])
 
             current_long_probs = []
             current_short_probs = []
 
-            for sl, tp in self.training_config['percentage_pairs']:
+            for sl, tp in TRAINING_CONFIG['percentage_pairs']:
                 long_col = f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'
                 short_col = f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'
 
-                current_long_probs.append(self.df[long_col].iloc[i + self.training_config['backward_window']])
-                current_short_probs.append(self.df[short_col].iloc[i + self.training_config['backward_window']])
+                current_long_probs.append(self.df[long_col].iloc[i + TRAINING_CONFIG['backward_window']])
+                current_short_probs.append(self.df[short_col].iloc[i + TRAINING_CONFIG['backward_window']])
 
             y_long.append(current_long_probs)
             y_short.append(current_short_probs)
@@ -236,8 +219,8 @@ class CryptoDataProcessor:
             Dense(128, activation='relu'),
             BatchNormalization(),
             Dropout(0.3),
-            Dense(2 * len(self.training_config['percentage_pairs']), activation='sigmoid'),
-            Reshape((2, len(self.training_config['percentage_pairs'])))
+            Dense(2 * len(TRAINING_CONFIG['percentage_pairs']), activation='sigmoid'),
+            Reshape((2, len(TRAINING_CONFIG['percentage_pairs'])))
         ])
 
         model.compile(
@@ -260,7 +243,7 @@ class CryptoDataProcessor:
         return self.model.fit(
             X_train, y_train,
             validation_data=(X_test, y_test),
-            epochs=self.training_config['epochs'],
+            epochs=TRAINING_CONFIG['epochs'],
             batch_size=64,
             callbacks=callbacks,
             verbose=1
@@ -274,23 +257,25 @@ class CryptoDataProcessor:
         self.model.save(os.path.join(model_folder, model_name))
         np.save(os.path.join(model_folder, 'scaler_min.npy'), self.scaler.min_)
         np.save(os.path.join(model_folder, 'scaler_scale.npy'), self.scaler.scale_)
-        np.save(os.path.join(model_folder, 'percentage_pairs.npy'), self.training_config['percentage_pairs'])
 
-        if self.feature_columns is not None:
-            with open(os.path.join(model_folder, 'feature_columns.json'), 'w') as f:
-                json.dump(self.feature_columns, f)
+        with open(os.path.join(model_folder, 'training_config.pkl'), 'wb') as f:
+            pickle.dump(TRAINING_CONFIG, f)
+
+        with open(os.path.join(model_folder, 'feature_columns.json'), 'w') as f:
+            json.dump(self.feature_columns, f)
 
     def load_model(self, model_folder: str = '', model_name: str = 'model.keras') -> None:
         """Загрузка модели и всех связанных данных"""
         self.model = load_model(os.path.join(model_folder, model_name))
         self.scaler.min_ = np.load(os.path.join(model_folder, 'scaler_min.npy'))
         self.scaler.scale_ = np.load(os.path.join(model_folder, 'scaler_scale.npy'))
-        self.training_config['percentage_pairs'] = np.load(os.path.join(model_folder, 'percentage_pairs.npy'), allow_pickle=True)
 
-        feature_columns_path = os.path.join(model_folder, 'feature_columns.json')
-        if os.path.exists(feature_columns_path):
-            with open(feature_columns_path, 'r') as f:
-                self.feature_columns = json.load(f)
+        global TRAINING_CONFIG
+        with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
+            TRAINING_CONFIG = pickle.load(f)
+
+        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
+            self.feature_columns = json.load(f)
 
     def evaluate_on_new_data(self, X_train: np.ndarray, X_test: np.ndarray,
                     y_train: np.ndarray, y_test: np.ndarray) -> None:
@@ -334,6 +319,6 @@ class CryptoDataProcessor:
 
 
 if __name__ == "__main__":
-    processor = CryptoDataProcessor(TRAINING_CONFIG)
-    processor.run_pipeline(csv_path="BTCUSDT-1m-2023-JAN-FEB-MAR.csv", mode="training")
-    processor.run_pipeline(csv_path="BTCUSDT-1m-2025-04.csv", mode="evaluating")
+    trainer = CryptoModelTrainer()
+    trainer.run_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'], mode="training")
+    trainer.run_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'], mode="evaluating")
