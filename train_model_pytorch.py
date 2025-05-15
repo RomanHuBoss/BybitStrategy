@@ -1,31 +1,83 @@
+import json
 import os
+import pickle
+
 import pandas as pd
 import numpy as np
-import json
-import pickle
-from ta.volatility import BollingerBands
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator, EMAIndicator
-from ta.volume import OnBalanceVolumeIndicator
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, BatchNormalization, Reshape
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-from tensorflow.keras.optimizers import Adam
-import tensorflow as tf
-from datetime import datetime
-from typing import Optional, Tuple, List, Dict, Any
-from training_config import TRAINING_CONFIG
-import warnings
-
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator, EMAIndicator, MACD
+from ta.volatility import BollingerBands
+from ta.volume import OnBalanceVolumeIndicator
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from training_config import TRAINING_CONFIG
+from datetime import datetime
 
-#print(torch.cuda.is_available())
-#print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
-#exit(0)
+# Проверка доступности GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-#warnings.filterwarnings('ignore')
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, output_size):
+        super().__init__()
+
+        # LSTM layers
+        self.lstm1 = nn.LSTM(input_size, 256, batch_first=True)
+        self.lstm2 = nn.LSTM(256, 128, batch_first=True)
+        self.lstm3 = nn.LSTM(128, 128, batch_first=True)
+
+        # Normalization and dropout
+        self.bn1 = nn.BatchNorm1d(256)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(128)
+        self.dropout = nn.Dropout(0.3)
+
+        # Dense layers
+        self.fc1 = nn.Linear(128, 128)
+        self.bn4 = nn.BatchNorm1d(128)
+        self.fc2 = nn.Linear(128, output_size)
+
+        # Weight initialization
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, param in self.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+
+    def forward(self, x):
+        # LSTM layers
+        x, _ = self.lstm1(x)
+        x = self._apply_bn(x, self.bn1)
+
+        x, _ = self.lstm2(x)
+        x = self._apply_bn(x, self.bn2)
+
+        x, _ = self.lstm3(x)
+        x = x[:, -1, :]  # Last timestep only
+        x = self.bn3(x)
+        x = self.dropout(x)
+
+        # Dense layers
+        x = torch.relu(self.bn4(self.fc1(x)))
+        x = self.dropout(x)
+        x = torch.sigmoid(self.fc2(x))
+
+        return x.view(x.size(0), 2, -1)
+
+    def _apply_bn(self, x, bn_layer):
+        """Helper for batch norm application on LSTM outputs"""
+        return bn_layer(x.permute(0, 2, 1)).permute(0, 2, 1)
+
 
 class CryptoModelTrainer:
     def __init__(self):
@@ -40,12 +92,12 @@ class CryptoModelTrainer:
         try:
             self.df = pd.read_csv(file_path)
             self.df['open_time'] = pd.to_datetime(self.df['open_time'], unit='ms')
-            self.df.drop(['close_time', 'quote_volume', 'count', 'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'],
-                         axis=1, inplace=True)
+            self.df.drop(
+                ['close_time', 'quote_volume', 'count', 'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'],
+                axis=1, inplace=True)
             print("Данные успешно загружены. Доступно строк:", len(self.df))
         except Exception as e:
             raise ValueError(f"Ошибка загрузки данных: {str(e)}")
-
 
     def create_features(self) -> None:
         """Полная обработка внутреннего датафрейма (фичи + индикаторы)"""
@@ -55,7 +107,6 @@ class CryptoModelTrainer:
         self._add_time_features_to_df()
         self._add_technical_indicators_to_df()
         self._analyze_price_movements_on_df()
-
 
     # Приватные методы для работы только с внутренним датафреймом
     def _add_time_features_to_df(self) -> None:
@@ -76,18 +127,6 @@ class CryptoModelTrainer:
 
     def _add_technical_indicators_to_df(self) -> None:
         """Добавление технических индикаторов к внутреннему датафрейму"""
-        windows = np.arange(10, TRAINING_CONFIG['backward_window'], 10)
-
-        for window in windows:
-            self.df[f'sma_{window}'] = SMAIndicator(close=self.df['close'], window=window).sma_indicator()
-            self.df[f'ema_{window}'] = EMAIndicator(close=self.df['close'], window=window).ema_indicator()
-            self.df[f'rsi_{window}'] = RSIIndicator(close=self.df['close'], window=window).rsi()
-
-            bb = BollingerBands(close=self.df['close'], window=window)
-            self.df[f'bb_bbm_{window}'] = bb.bollinger_mavg()
-            self.df[f'bb_bbh_{window}'] = bb.bollinger_hband()
-            self.df[f'bb_bbl_{window}'] = bb.bollinger_lband()
-
         macd = MACD(close=self.df['close'], window_slow=26, window_fast=12, window_sign=9)
         self.df['macd'] = macd.macd()
         self.df['macd_signal'] = macd.macd_signal()
@@ -98,7 +137,16 @@ class CryptoModelTrainer:
             volume=self.df['volume']
         ).on_balance_volume()
 
-        for window in windows:
+        for window in TRAINING_CONFIG['windows']:
+            self.df[f'sma_{window}'] = SMAIndicator(close=self.df['close'], window=window).sma_indicator()
+            self.df[f'ema_{window}'] = EMAIndicator(close=self.df['close'], window=window).ema_indicator()
+            self.df[f'rsi_{window}'] = RSIIndicator(close=self.df['close'], window=window).rsi()
+
+            bb = BollingerBands(close=self.df['close'], window=window)
+            self.df[f'bb_bbm_{window}'] = bb.bollinger_mavg()
+            self.df[f'bb_bbh_{window}'] = bb.bollinger_hband()
+            self.df[f'bb_bbl_{window}'] = bb.bollinger_lband()
+
             self.df[f'obv_ma_{window}'] = self.df['obv'].rolling(window=window).mean()
 
         self.df = self.df.bfill().ffill().dropna()
@@ -160,8 +208,7 @@ class CryptoModelTrainer:
 
         self.df.to_csv("tmp.csv")
 
-
-    def prepare_train_test_split(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def prepare_train_test_split(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Подготовка данных для обучения"""
 
         # сколько свечей нужно для обучения
@@ -210,58 +257,92 @@ class CryptoModelTrainer:
             random_state=42
         )
 
-    def build_model(self, input_shape: Tuple[int, int]) -> Sequential:
+    def build_model(self, input_size: int) -> nn.Module:
         """Создание модели LSTM"""
-        model = Sequential([
-            Input(shape=input_shape),  # Add this as the first layer
-            LSTM(256, return_sequences=True),
-            BatchNormalization(),
-            Dropout(0.3),
-            LSTM(128, return_sequences=True),
-            BatchNormalization(),
-            Dropout(0.3),
-            LSTM(128),
-            BatchNormalization(),
-            Dropout(0.3),
-            Dense(128, activation='relu'),
-            BatchNormalization(),
-            Dropout(0.3),
-            Dense(2 * len(TRAINING_CONFIG['percentage_pairs']), activation='sigmoid'),
-            Reshape((2, len(TRAINING_CONFIG['percentage_pairs'])))
-        ])
+        output_size = 2 * len(TRAINING_CONFIG['percentage_pairs'])
+        model = LSTMModel(input_size=input_size, output_size=output_size)
+        return model.to(device)
 
-        model.compile(
-            optimizer=Adam(learning_rate=0.001),
-            loss='binary_crossentropy',
-            metrics=['accuracy']
+    def train_model(self, X_train, X_test, y_train, y_test):
+        # Конвертируем данные в тензоры НА CPU
+        train_data = TensorDataset(
+            torch.FloatTensor(X_train),  # Оставляем на CPU
+            torch.FloatTensor(y_train)  # Оставляем на CPU
         )
-        return model
 
-    def train_model(self, X_train: np.ndarray, X_test: np.ndarray,
-                    y_train: np.ndarray, y_test: np.ndarray) -> Any:
-        """Обучение модели"""
-        self.model = self.build_model(input_shape=(X_train.shape[1], X_train.shape[2]))
-
-        callbacks = [
-            ModelCheckpoint('best_model.keras', save_best_only=True),
-            EarlyStopping(patience=10, restore_best_weights=True)
-        ]
-
-        return self.model.fit(
-            X_train, y_train,
-            validation_data=(X_test, y_test),
-            epochs=TRAINING_CONFIG['epochs'],
+        # DataLoader с pin_memory=True только для CPU тензоров
+        train_loader = DataLoader(
+            train_data,
             batch_size=64,
-            callbacks=callbacks,
-            verbose=1
+            shuffle=True,
+            pin_memory=True  # Разрешаем pinning только для CPU данных
         )
 
-    def save_model(self, model_folder: str = '', model_name: str = 'model.keras') -> None:
+        # Инициализация модели и перенос на устройство
+        self.model = LSTMModel(
+            input_size=X_train.shape[2],
+            output_size=2 * len(TRAINING_CONFIG['percentage_pairs'])
+        ).to(device)
+
+        optimizer = optim.AdamW(self.model.parameters(), lr=0.001, weight_decay=1e-4)
+        criterion = nn.BCELoss()
+
+        for epoch in range(TRAINING_CONFIG['epochs']):
+            self.model.train()
+            epoch_loss = 0
+
+            for x_batch, y_batch in train_loader:
+                # Переносим батч на устройство (GPU если доступно)
+                x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+
+                optimizer.zero_grad(set_to_none=True)
+                outputs = self.model(x_batch)
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                optimizer.step()
+
+                epoch_loss += loss.item()
+
+            # Валидация
+            val_loss, val_acc = self._validate(X_test, y_test)
+            print(f"Epoch {epoch + 1}: Train Loss: {epoch_loss / len(train_loader):.4f} "
+                  f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.4f}")
+
+    def _validate(self, X, y):
+        self.model.eval()
+        val_data = TensorDataset(
+            torch.FloatTensor(X).to(device),
+            torch.FloatTensor(y).to(device))
+
+        val_loader = DataLoader(val_data, batch_size=128, shuffle=False)
+
+        total_loss = 0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for x_batch, y_batch in val_loader:
+                outputs = self.model(x_batch)
+                loss = nn.BCELoss()(outputs, y_batch)
+                total_loss += loss.item()
+
+                # Конвертируем в предсказанные классы (0 или 1)
+                predicted = (outputs > 0.5).float()
+
+                # Сравниваем предсказания с истинными значениями
+                # и считаем количество полностью правильных предсказаний
+                correct += torch.all(predicted == y_batch, dim=2).sum().item()
+                total += y_batch.size(0)  # Количество примеров в батче
+
+        return total_loss / len(val_loader), correct / total
+
+    def save_model(self, model_folder: str = '', model_name: str = 'model.pth') -> None:
         """Сохранение модели и всех связанных данных"""
         if not os.path.exists(model_folder):
             os.makedirs(model_folder)
 
-        self.model.save(os.path.join(model_folder, model_name))
+        torch.save(self.model.state_dict(), os.path.join(model_folder, model_name))
         np.save(os.path.join(model_folder, 'scaler_min.npy'), self.scaler.min_)
         np.save(os.path.join(model_folder, 'scaler_scale.npy'), self.scaler.scale_)
 
@@ -271,9 +352,14 @@ class CryptoModelTrainer:
         with open(os.path.join(model_folder, 'feature_columns.json'), 'w') as f:
             json.dump(self.feature_columns, f)
 
-    def load_model(self, model_folder: str = '', model_name: str = 'model.keras') -> None:
+    def load_model(self, model_folder: str = '', model_name: str = 'model.pth') -> None:
         """Загрузка модели и всех связанных данных"""
-        self.model = load_model(os.path.join(model_folder, model_name))
+        # Сначала создаем модель с правильной архитектурой
+        self.model = self.build_model(input_size=len(self.feature_columns))
+        # Затем загружаем веса
+        self.model.load_state_dict(torch.load(os.path.join(model_folder, model_name)))
+        self.model.to(device)
+
         self.scaler.min_ = np.load(os.path.join(model_folder, 'scaler_min.npy'))
         self.scaler.scale_ = np.load(os.path.join(model_folder, 'scaler_scale.npy'))
 
@@ -285,12 +371,39 @@ class CryptoModelTrainer:
             self.feature_columns = json.load(f)
 
     def evaluate_on_new_data(self, X_train: np.ndarray, X_test: np.ndarray,
-                    y_train: np.ndarray, y_test: np.ndarray) -> None:
+                             y_train: np.ndarray, y_test: np.ndarray) -> None:
+        """Оценка модели на новых данных"""
+        X_test_tensor = torch.FloatTensor(X_test).to(device)
+        y_test_tensor = torch.FloatTensor(y_test).to(device)
 
-        loss, accuracy = self.model.evaluate(X_test, y_test)
-        print(f"Test Loss: {loss:.4f}, Test Accuracy: {accuracy:.4f}")
+        test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+        test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-    def run_pipeline(self, csv_path, mode = "training") -> None:
+        self.model.eval()
+        criterion = nn.BCELoss()
+
+        total_loss = 0.0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                outputs = self.model(inputs)
+                loss = criterion(outputs, targets)
+
+                total_loss += loss.item() * inputs.size(0)
+
+                # Вычисление точности
+                predicted = (outputs > 0.5).float()
+                correct += torch.all(predicted == targets, dim=2).sum().item()
+                total += targets.size(0) * targets.size(2)  # Учитываем все предсказания
+
+        test_loss = total_loss / len(test_loader.dataset)
+        test_acc = correct / total
+
+        print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}")
+
+    def run_pipeline(self, csv_path, mode="training") -> None:
         """Запуск пайплайна для обучения или оценки обученной модели"""
 
         if mode == 'training':
@@ -305,11 +418,11 @@ class CryptoModelTrainer:
         self.create_features()
 
         print("3. Формирование наборов данных для передачи в модель")
-        train_test_split = self.prepare_train_test_split()
+        X_train, X_test, y_train, y_test = self.prepare_train_test_split()
 
         if mode == "training":
             print("4. Обучение модели")
-            self.train_model(*train_test_split)
+            self.train_model(X_train, X_test, y_train, y_test)
 
             print("5. Сохранение модели")
             self.save_model(model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
@@ -318,7 +431,7 @@ class CryptoModelTrainer:
 
         elif mode == "evaluating":
             print("4. Проверка обученной модели на других данных")
-            self.evaluate_on_new_data(*train_test_split)
+            self.evaluate_on_new_data(X_train, X_test, y_train, y_test)
 
             print("Готово! Модель протестирована.")
         else:

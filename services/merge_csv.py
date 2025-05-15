@@ -16,6 +16,8 @@ else:
 
     # Читаем и объединяем все CSV-файлы
     for file in csv_files:
+        if file == 'combined_csv.csv':
+            continue
         file_path = os.path.join(folder_path, file)
         data = pd.read_csv(file_path)
         combined_data = pd.concat([combined_data, data], ignore_index=True)
