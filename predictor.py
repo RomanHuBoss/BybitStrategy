@@ -1,303 +1,352 @@
-import pickle
-import os
 import json
+import os
+import pickle
+import logging
 import numpy as np
 import pandas as pd
-from ta.volatility import BollingerBands
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator, EMAIndicator
-from ta.volume import OnBalanceVolumeIndicator
+import torch
+import torch.nn as nn
+from typing import Dict, List, Tuple, Optional
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import load_model
-from typing import Dict, Any, List, Optional, Generator
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator, EMAIndicator, MACD
+from ta.volatility import BollingerBands
+from ta.volume import OnBalanceVolumeIndicator
+from torch.utils.data import DataLoader, TensorDataset
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Проверка GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Using device: {device}")
+
+
+class LSTMModel(nn.Module):
+    def __init__(self, input_size: int, output_size: int):
+        super().__init__()
+        self.lstm1 = nn.LSTM(input_size, 256, batch_first=True)
+        self.lstm2 = nn.LSTM(256, 128, batch_first=True)
+        self.lstm3 = nn.LSTM(128, 128, batch_first=True)
+
+        self.bn1 = nn.BatchNorm1d(256)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(128)
+        self.dropout = nn.Dropout(0.3)
+
+        self.fc1 = nn.Linear(128, 128)
+        self.bn4 = nn.BatchNorm1d(128)
+        self.fc2 = nn.Linear(128, output_size)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, param in self.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.lstm1(x)
+        x = self._apply_bn(x, self.bn1)
+
+        x, _ = self.lstm2(x)
+        x = self._apply_bn(x, self.bn2)
+
+        x, _ = self.lstm3(x)
+        x = x[:, -1, :]  # Последний шаг
+        x = self.bn3(x)
+        x = self.dropout(x)
+
+        x = torch.relu(self.bn4(self.fc1(x)))
+        x = self.dropout(x)
+        x = torch.sigmoid(self.fc2(x))
+
+        return x.view(x.size(0), 2, -1)
+
+    def _apply_bn(self, x: torch.Tensor, bn_layer: nn.Module) -> torch.Tensor:
+        return bn_layer(x.permute(0, 2, 1)).permute(0, 2, 1)
+
 
 class CryptoModelPredictor:
-    def __init__(self, model_folder: str):
-        """
-        Инициализация прогнозировщика с загрузкой модели и связанных данных.
-
-        Args:
-            model_folder: Путь к папке с сохраненной моделью и файлами конфигурации.
-        """
-        self.model = None
+    def __init__(self, config_path: Optional[str] = None):
+        self.df: Optional[pd.DataFrame] = None
+        self.model: Optional[LSTMModel] = None
         self.scaler = MinMaxScaler(feature_range=(0, 1))
-        self.training_config = None
-        self.required_raw_columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
-        self.load_model(model_folder)
+        self.feature_columns: Optional[List[str]] = None
+        self.training_config = self._load_config(config_path)
 
-    def load_model(self, model_folder: str) -> None:
-        """Загружает модель и все связанные данные из указанной папки"""
-        if not os.path.exists(model_folder):
-            raise ValueError(f"Папка {model_folder} не существует")
+    def _load_config(self, path: Optional[str]) -> Dict:
+        """Загружает конфиг из файла или использует значения по умолчанию"""
+        default_config = {
+            'windows': [5, 10, 20, 50],
+            'forward_window': 20,
+            'backward_window': 60,
+            'percentage_pairs': [
+                (0.01, 0.02),
+                (0.02, 0.04),
+                (0.03, 0.06)
+            ]
+        }
+        if path and os.path.exists(path):
+            with open(path, 'r') as f:
+                return json.load(f)
+        return default_config
 
-        # Загрузка модели
-        model_path = os.path.join(model_folder, 'model.keras')
-        if not os.path.exists(model_path):
-            raise ValueError(f"Файл модели не найден: {model_path}")
-        self.model = load_model(model_path)
+    def load_trading_data_from_csv(self, file_path: str) -> None:
+        """Загружает и очищает данные из CSV"""
+        try:
+            self.df = pd.read_csv(file_path)
+            self.df['open_time'] = pd.to_datetime(self.df['open_time'], unit='ms')
+            cols_to_drop = [col for col in [
+                'close_time', 'quote_volume', 'count',
+                'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'
+            ] if col in self.df.columns]
+            self.df.drop(cols_to_drop, axis=1, inplace=True)
+            logger.info(f"Данные загружены. Строк: {len(self.df)}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки: {str(e)}")
+            raise
 
-        # Загрузка scaler
-        scaler_min_path = os.path.join(model_folder, 'scaler_min.npy')
-        scaler_scale_path = os.path.join(model_folder, 'scaler_scale.npy')
-        if not (os.path.exists(scaler_min_path) and os.path.exists(scaler_scale_path)):
-            raise ValueError("Не найдены файлы scaler")
+    def create_features(self) -> None:
+        """Генерация всех фичей и целевых переменных"""
+        if self.df is None:
+            raise ValueError("Данные не загружены")
 
-        self.scaler.min_ = np.load(scaler_min_path)
-        self.scaler.scale_ = np.load(scaler_scale_path)
+        self._add_time_features()
+        self._add_technical_indicators()
+        self._generate_targets()
 
-        training_config_path = os.path.join(model_folder, 'training_config.pkl')
-        if not os.path.exists(training_config_path):
-            raise ValueError(f"Не найден файл с конфигурацией модели: {training_config_path}")
+    def _add_time_features(self) -> None:
+        """Добавляет временные фичи с циклическим кодированием"""
+        dt = self.df['open_time'].dt
+        self.df['month_sin'] = np.sin(2 * np.pi * dt.month / 12)
+        self.df['month_cos'] = np.cos(2 * np.pi * dt.month / 12)
+        self.df['day_sin'] = np.sin(2 * np.pi * dt.dayofweek / 7)
+        self.df['day_cos'] = np.cos(2 * np.pi * dt.dayofweek / 7)
+        self.df['hour_sin'] = np.sin(2 * np.pi * dt.hour / 24)
+        self.df['hour_cos'] = np.cos(2 * np.pi * dt.hour / 24)
 
-        with open(training_config_path, 'rb') as f:
-            self.training_config = pickle.load(f)
-
-        # Загрузка feature_columns
-        features_path = os.path.join(model_folder, 'feature_columns.json')
-        if not os.path.exists(features_path):
-            raise ValueError(f"Не найден файл с feature columns: {features_path}")
-        with open(features_path, 'r') as f:
-            self.feature_columns = json.load(f)
-
-    def add_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Добавляет временные и технические индикаторы к данным.
-
-        Args:
-            data: DataFrame с базовыми колонками: open_time, open, high, low, close, volume
-
-        Returns:
-            DataFrame с добавленными фичами
-        """
-        df = data.copy()
-
-        # 1. Добавляем временные фичи
-        if 'open_time' in df.columns:
-            df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-            df['day_of_week'] = df['open_time'].dt.dayofweek
-            df['month'] = df['open_time'].dt.month
-            df['hour'] = df['open_time'].dt.hour
-
-            # Циклическое кодирование
-            df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-            df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-            df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-            df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-
-            df.drop(['day_of_week', 'month', 'hour'], axis=1, inplace=True)
-
-        # 2. Добавляем технические индикаторы
-        windows = np.arange(10, self.training_config['backward_window'], 10)
-
-        for window in windows:
-            # Скользящие средние
-            df[f'sma_{window}'] = SMAIndicator(close=df['close'], window=window).sma_indicator()
-            df[f'ema_{window}'] = EMAIndicator(close=df['close'], window=window).ema_indicator()
-
-            # RSI
-            df[f'rsi_{window}'] = RSIIndicator(close=df['close'], window=window).rsi()
-
-            # Bollinger Bands
-            bb = BollingerBands(close=df['close'], window=window)
-            df[f'bb_bbm_{window}'] = bb.bollinger_mavg()
-            df[f'bb_bbh_{window}'] = bb.bollinger_hband()
-            df[f'bb_bbl_{window}'] = bb.bollinger_lband()
+    def _add_technical_indicators(self) -> None:
+        """Добавляет технические индикаторы"""
+        close = self.df['close']
+        volume = self.df['volume']
 
         # MACD
-        macd = MACD(close=df['close'], window_slow=26, window_fast=12, window_sign=9)
-        df['macd'] = macd.macd().fillna(0)
-        df['macd_signal'] = macd.macd_signal().fillna(0)
-        df['macd_diff'] = macd.macd_diff().fillna(0)
+        macd = MACD(close=close, window_slow=26, window_fast=12, window_sign=9)
+        self.df['macd'] = macd.macd()
+        self.df['macd_signal'] = macd.macd_signal()
+        self.df['macd_diff'] = macd.macd_diff()
 
         # OBV
-        df['obv'] = OnBalanceVolumeIndicator(
-            close=df['close'],
-            volume=df['volume']
-        ).on_balance_volume()
+        self.df['obv'] = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
 
-        for window in windows:
-            df[f'obv_ma_{window}'] = df['obv'].rolling(window=window).mean()
+        # Остальные индикаторы
+        for window in self.training_config['windows']:
+            self.df[f'sma_{window}'] = SMAIndicator(close=close, window=window).sma_indicator()
+            self.df[f'ema_{window}'] = EMAIndicator(close=close, window=window).ema_indicator()
+            self.df[f'rsi_{window}'] = RSIIndicator(close=close, window=window).rsi()
 
-        # Удаляем возможные NaN и возвращаем только нужные колонки
-        df = df.bfill().ffill()
-        if self.feature_columns:
-            df = df[self.feature_columns]
+            bb = BollingerBands(close=close, window=window)
+            self.df[f'bb_bbm_{window}'] = bb.bollinger_mavg()
+            self.df[f'bb_bbh_{window}'] = bb.bollinger_hband()
+            self.df[f'bb_bbl_{window}'] = bb.bollinger_lband()
+            self.df[f'obv_ma_{window}'] = self.df['obv'].rolling(window=window).mean()
 
-        return df.dropna()
+        self.df = self.df.bfill().ffill().dropna()
 
-    def predict(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Делает прогноз на основе уже обработанных данных с фичами.
+    def _generate_targets(self) -> None:
+        """Генерирует целевые переменные для обучения"""
+        min_samples = self.training_config['forward_window']
+        if len(self.df) < min_samples:
+            raise ValueError(f"Нужно минимум {min_samples} свечей")
 
-        Args:
-            processed_data: Словарь с обработанными данными {feature: [values]}
+        close_prices = self.df['close'].values
+        new_cols = {}
 
-        Returns:
-            Словарь с прогнозами для long/short позиций
-        """
-        if self.model is None:
-            raise ValueError("Модель не загружена")
+        for sl_pct, tp_pct in self.training_config['percentage_pairs']:
+            new_cols[f'long_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'] = np.zeros(len(self.df))
+            new_cols[f'short_success_sl_{sl_pct:.4f}_tp_{tp_pct:.4f}'] = np.zeros(len(self.df))
 
-        # Проверяем наличие всех фичей
-        missing_features = set(self.feature_columns) - set(processed_data.keys())
-        if missing_features:
-            raise ValueError(f"Отсутствуют фичи: {missing_features}")
+        self.df = pd.concat([self.df, pd.DataFrame(new_cols)], axis=1)
 
-        # Подготавливаем данные для модели
-        input_array = np.array([processed_data[feature][-self.training_config['backward_window']:] for feature in self.feature_columns]).T
-        scaled_input = self.scaler.transform(input_array)
+        # Векторизованный расчет
+        for i in range(len(self.df) - min_samples):
+            current = close_prices[i]
+            future = close_prices[i + 1: i + min_samples + 1]
 
-        # Делаем прогноз
-        predictions = self.model.predict(np.array([scaled_input]), verbose=0)
+            for sl, tp in self.training_config['percentage_pairs']:
+                # LONG
+                tp_hit = (future >= current * (1 + tp)).any()
+                sl_hit = (future <= current * (1 - sl)).any()
+                self.df.at[i, f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'] = int(tp_hit and not sl_hit)
 
-        # Форматируем результат
-        result = {'long': {}, 'short': {}}
+                # SHORT
+                tp_hit = (future <= current * (1 - tp)).any()
+                sl_hit = (future >= current * (1 + sl)).any()
+                self.df.at[i, f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'] = int(tp_hit and not sl_hit)
+
+    def prepare_validation_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Подготавливает данные для валидации"""
+        required = self.training_config['backward_window'] + self.training_config['forward_window']
+        if len(self.df) < required:
+            raise ValueError(f"Нужно минимум {required} свечей")
+
+        if self.feature_columns is None:
+            self.feature_columns = [
+                col for col in self.df.columns
+                if not col.startswith(('long_success', 'short_success'))
+                   and col not in ['open_time', 'close_time']
+            ]
+
+        data = self.df[self.feature_columns].values
+        if np.isnan(data).any():
+            data = np.nan_to_num(data, nan=np.nanmedian(data, axis=0))
+
+        self.scaler.fit(data)
+        scaled = self.scaler.transform(data)
+
+        X, y_long, y_short = [], [], []
+        for i in range(len(self.df) - required):
+            X.append(scaled[i:i + self.training_config['backward_window']])
+
+            long_probs = [
+                self.df[f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
+                for sl, tp in self.training_config['percentage_pairs']
+            ]
+            short_probs = [
+                self.df[f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
+                for sl, tp in self.training_config['percentage_pairs']
+            ]
+
+            y_long.append(long_probs)
+            y_short.append(short_probs)
+
+        return np.array(X), np.stack((y_long, y_short), axis=1)
+
+    def load_model(self, model_folder: str) -> None:
+        """Загружает модель и связанные данные"""
+        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
+            self.feature_columns = json.load(f)
+
+        with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
+            self.training_config = pickle.load(f)
+
+        self.model = self._build_model(len(self.feature_columns))
+        self.model.load_state_dict(torch.load(os.path.join(model_folder, 'model.pth')))
+        self.model.to(device)
+        self.model.eval()
+
+        self.scaler.min_ = np.load(os.path.join(model_folder, 'scaler_min.npy'))
+        self.scaler.scale_ = np.load(os.path.join(model_folder, 'scaler_scale.npy'))
+
+    def _build_model(self, input_size: int) -> LSTMModel:
+        """Создает новую модель"""
+        output_size = 2 * len(self.training_config['percentage_pairs'])
+        return LSTMModel(input_size, output_size).to(device)
+
+    def predict_last_30_candles(self) -> Dict:
+        """Прогнозирует для последних 30 свечей"""
+        required = self.training_config['backward_window'] + 30
+        if len(self.df) < required:
+            raise ValueError(f"Нужно минимум {required} свечей")
+
+        data = self.df[self.feature_columns].iloc[-required:].values
+        data = np.nan_to_num(data, nan=np.nanmedian(data, axis=0))
+        scaled = self.scaler.transform(data)
+
+        X = np.array([
+            scaled[i:i + self.training_config['backward_window']]
+            for i in range(30)
+        ])
+
+        with torch.no_grad():
+            preds = self.model(torch.FloatTensor(X).to(device)).cpu().numpy()
+
+        def safe_max(arr):
+            return float(np.max(arr)) if len(arr) > 0 else 0.0
+
+        long_probs = preds[:, 0].mean(axis=0)
+        short_probs = preds[:, 1].mean(axis=0)
+
+        result = {
+            'long': {},
+            'short': {},
+            'max_values': {
+                'long': {'max_sl': 0.0, 'max_tp': 0.0},
+                'short': {'max_sl': 0.0, 'max_tp': 0.0}
+            }
+        }
+
+        # Заполняем вероятности
         for i, (sl, tp) in enumerate(self.training_config['percentage_pairs']):
-            sl_key = f"sl_{sl:.4f}_tp_{tp:.4f}"
-            result['long'][sl_key] = float(predictions[0, 0, i])
-            result['short'][sl_key] = float(predictions[0, 1, i])
+            key = f"SL_{sl:.2%}_TP_{tp:.2%}"
+            result['long'][key] = float(long_probs[i])
+            result['short'][key] = float(short_probs[i])
+
+        # Вычисляем максимальные значения для prob > 0.55
+        long_sl_values = [
+            sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
+            if long_probs[i] > 0.55
+        ]
+        long_tp_values = [
+            tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
+            if long_probs[i] > 0.55
+        ]
+
+        short_sl_values = [
+            sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
+            if short_probs[i] > 0.55
+        ]
+        short_tp_values = [
+            tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
+            if short_probs[i] > 0.55
+        ]
+
+        result['max_values']['long']['max_sl'] = safe_max(long_sl_values)
+        result['max_values']['long']['max_tp'] = safe_max(long_tp_values)
+        result['max_values']['short']['max_sl'] = safe_max(short_sl_values)
+        result['max_values']['short']['max_tp'] = safe_max(short_tp_values)
 
         return result
 
-    def prepare_and_predict(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Полный пайплайн: преобразует сырые данные, добавляет фичи и делает прогноз.
+    def run_prediction_pipeline(self, csv_path: str, model_folder: str) -> Dict:
+        """Полный цикл прогнозирования"""
+        logger.info(f"Запуск прогноза для {csv_path}")
 
-        Args:
-            raw_data: Словарь с сырыми данными свечей (должен содержать open_time, open, high, low, close, volume)
+        self.load_model(model_folder)
+        self.load_trading_data_from_csv(csv_path)
+        self.create_features()
 
-        Returns:
-            Результат прогноза в формате {'long': {sl_tp: prob}, 'short': {sl_tp: prob}}
-        """
-        # Проверяем сырые данные
-        missing_columns = set(self.required_raw_columns) - set(raw_data.keys())
-        if missing_columns:
-            raise ValueError(f"В сырых данных отсутствуют колонки: {missing_columns}")
+        prediction = self.predict_last_30_candles()
 
-        # Конвертируем в DataFrame
-        df = pd.DataFrame(raw_data)
+        # Логируем результаты
+        logger.info("\nРезультаты для LONG:")
+        for strat, prob in prediction['long'].items():
+            if prob > 0.55:
+                logger.info(f"{strat}: {prob:.2%}")
 
-        # Добавляем фичи
-        df_with_features = self.add_features(df)
+        logger.info("\nРезультаты для SHORT:")
+        for strat, prob in prediction['short'].items():
+            if prob > 0.55:
+                logger.info(f"{strat}: {prob:.2%}")
 
-        # Конвертируем обратно в словарь и делаем прогноз
-        processed_data = {col: df_with_features[col].values for col in self.feature_columns}
-        return self.predict(processed_data)
+        logger.info("\nМаксимальные значения:")
+        logger.info(
+            f"LONG: SL={prediction['max_values']['long']['max_sl']:.2%}, TP={prediction['max_values']['long']['max_tp']:.2%}")
+        logger.info(
+            f"SHORT: SL={prediction['max_values']['short']['max_sl']:.2%}, TP={prediction['max_values']['short']['max_tp']:.2%}")
 
-    def get_model_info(self) -> Dict[str, Any]:
-        """Возвращает информацию о загруженной модели"""
-        return {
-            'feature_columns': self.feature_columns,
-            'percentage_pairs': [{'sl': float(sl), 'tp': float(tp)}
-                                 for sl, tp in self.training_config['percentage_pairs']],
-            'input_shape': self.model.input_shape[1:] if self.model else None,
-            'required_raw_columns': self.required_raw_columns
-        }
-
-    def get_last_prediction(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Упрощенный метод для получения последнего прогноза (без хранения состояния)
-
-        Args:
-            raw_data: Словарь с историей свечей (минимум self.training_config['backward_window'])
-
-        Returns:
-            Последний прогноз для всех пар sl/tp
-        """
-        return self.prepare_and_predict(raw_data)
-
-    def process_csv_file(self, file_path: str) -> Generator[Dict[str, Any], None, None]:
-        """
-        Обрабатывает CSV-файл с историческими данными и возвращает генератор прогнозов для каждой свечи.
-
-        Args:
-            file_path: Путь к CSV-файлу с данными
-
-        Yields:
-            Словарь с прогнозами для каждой свечи после накопления достаточного количества данных
-        """
-        # Читаем CSV-файл
-        df = pd.read_csv(file_path)
-        print(f"\nВсего свечей для обработки {len(df)}")
-
-        # Проверяем наличие необходимых колонок
-        required_columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
-        missing_columns = set(required_columns) - set(df.columns)
-        if missing_columns:
-            raise ValueError(f"В CSV-файле отсутствуют колонки: {missing_columns}")
-
-        # Конвертируем open_time в int (на случай если в CSV он записан как строка)
-        df['open_time'] = df['open_time'].astype(int)
-
-        # Сортируем по времени (на всякий случай)
-        df = df.sort_values(by='open_time', ascending=True).reset_index(drop=True)
-
-        # Накопленный буфер данных
-        data_buffer = {col: [] for col in required_columns}
-
-        for _, row in df.iterrows():
-            # Добавляем новую свечу в буфер
-            for col in required_columns:
-                data_buffer[col].append(row[col])
-
-            # Удаляем старые данные, если буфер превышает self.training_config['backward_window'] свечей
-            for col in required_columns:
-                if len(data_buffer[col]) > self.training_config['backward_window']:
-                    data_buffer[col] = data_buffer[col][-self.training_config['backward_window']:]
-
-            # Когда накопилось достаточно данных, делаем прогноз
-            if len(data_buffer['open_time']) == self.training_config['backward_window']:
-                try:
-                    predictions = self.prepare_and_predict(data_buffer)
-                    yield {
-                        'open_time': row['open_time'],
-                        'close': row['close'],
-                        'predictions': predictions
-                    }
-                except Exception as e:
-                    print(f"Ошибка при обработке свечи {row['open_time']}: {str(e)}")
-                    continue
+        return prediction
 
 
-# Инициализация прогнозировщика
-predictor = CryptoModelPredictor("models/13-05-2025 23-37-34")
-
-# Получение информации о модели
-print("Информация о модели:", predictor.get_model_info())
-
-
-# Пример 2: Обработка CSV-файла
-csv_file = "BTCUSDT_1m_2025-05-13-18-28.csv"
-if os.path.exists(csv_file):
-    print(f"\nОбработка файла {csv_file}...")
-
-    # Счетчик для ограничения вывода в примере
-    counter = 0
-    #max_examples = 5
-
-    # результаты обработки
-    for result in predictor.process_csv_file(csv_file):
-        # Выводим информацию о свече и лучших рекомендациях
-
-        best_long = max(result['predictions']['long'].items(), key=lambda x: x[1])
-        best_short = max(result['predictions']['short'].items(), key=lambda x: x[1])
-
-        threshold = 0.65
-        if best_long[1] > threshold or best_short[1] > threshold:
-            print(f"\nВыводится результат №{counter}")
-            print(f"\nСвеча {pd.to_datetime(result['open_time'], unit='ms')} (цена закрытия: {result['close']})")
-            if best_long[1] > threshold:
-                print(f"Лучшая long стратегия: {best_long[0]} с вероятностью {best_long[1]:.2%}")
-                print(result['predictions']['long'])
-
-            if best_short[1] > threshold:
-                print(f"Лучшая short стратегия: {best_short[0]} с вероятностью {best_short[1]:.2%}")
-                print(result['predictions']['short'])
-
-
-
-        counter += 1
-else:
-    print(f"\nФайл {csv_file} не найден, пример обработки CSV пропущен")
+if __name__ == "__main__":
+    predictor = CryptoModelPredictor()
+    prediction = predictor.run_prediction_pipeline(
+        csv_path=os.path.join("downloads", "BOBAUSDT_1m_2025-05-16-20-19.csv"),
+        model_folder=os.path.join("models", "model-4month-16-05-2025 11-37-14")
+    )

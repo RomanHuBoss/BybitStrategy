@@ -161,6 +161,8 @@ class CryptoModelTrainer:
                 f"Недостаточно данных для анализа. Требуется минимум {TRAINING_CONFIG['forward_window']} свечей, доступно {len(self.df)}")
 
         close_prices = self.df['close'].values
+        high_prices = self.df['high'].values
+        low_prices = self.df['low'].values
         max_analysis_index = len(close_prices) - TRAINING_CONFIG['forward_window']
 
         # Создаем словарь для новых столбцов
@@ -182,31 +184,32 @@ class CryptoModelTrainer:
 
             for i in range(max_analysis_index):
                 current_price = close_prices[i]
-                next_prices = close_prices[i + 1:i + TRAINING_CONFIG['forward_window'] + 1]
+                future_highs = high_prices[i + 1:i + TRAINING_CONFIG['forward_window'] + 1]
+                future_lows = low_prices[i + 1:i + TRAINING_CONFIG['forward_window'] + 1]
 
                 # LONG позиция
                 long_tp = current_price * (1 + tp_pct)
                 long_sl = current_price * (1 - sl_pct)
 
-                for j, price in enumerate(next_prices):
-                    if price >= long_tp:
+                # Проверяем, достигнут ли TP (по максимальной цене) или SL (по минимальной цене)
+                for high, low in zip(future_highs, future_lows):
+                    if high >= long_tp:  # TP достигнут по high
                         self.df.at[i, long_col] = 1
                         break
-                    elif price <= long_sl:
+                    if low <= long_sl:  # SL достигнут по low
                         break
 
                 # SHORT позиция
                 short_tp = current_price * (1 - tp_pct)
                 short_sl = current_price * (1 + sl_pct)
 
-                for j, price in enumerate(next_prices):
-                    if price <= short_tp:
+                # Проверяем, достигнут ли TP (по минимальной цене) или SL (по максимальной цене)
+                for high, low in zip(future_highs, future_lows):
+                    if low <= short_tp:  # TP достигнут по low
                         self.df.at[i, short_col] = 1
                         break
-                    elif price >= short_sl:
+                    if high >= short_sl:  # SL достигнут по high
                         break
-
-        self.df.to_csv("tmp.csv")
 
     def prepare_train_test_split(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Подготовка данных для обучения"""
@@ -507,7 +510,7 @@ class CryptoModelTrainer:
 
 if __name__ == "__main__":
     trainer = CryptoModelTrainer()
-    # trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
-    #                                 model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
-    trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
-                                    model_folder=os.path.join('models', f"model-4month-16-05-2025 11-37-14"))
+    trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
+                                     model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+    # trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
+    #                                 model_folder=os.path.join('models', f"model-4month-16-05-2025 11-37-14"))

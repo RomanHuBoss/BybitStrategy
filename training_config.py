@@ -2,7 +2,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
 TRAINING_CONFIG = {
-    'epochs': 200, # максимальное число эпох обучения
+    'epochs': 10, # максимальное число эпох обучения
     'stop_loss_levels': np.arange(0.001, 0.03, 0.001), # уровни стоп-лосса (x100 - получим % от текущей цены)
     'take_profit_multipliers': np.arange(2, 7, 1), # множители для уровней тейк-профит (x100 - получим % от текущей цены)
     'scaler':  MinMaxScaler(feature_range=(0, 1)),
