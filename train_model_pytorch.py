@@ -257,6 +257,52 @@ class CryptoModelTrainer:
             random_state=42
         )
 
+    def prepare_validation_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Подготовка данных для валидации модели (без разделения на train/test)"""
+        # Проверка минимального количества данных
+        data_size_needed_to_work = TRAINING_CONFIG['backward_window'] + TRAINING_CONFIG['forward_window']
+
+        if len(self.df) < data_size_needed_to_work:
+            raise ValueError(f"Нужно минимум {data_size_needed_to_work} строк, доступно {len(self.df)}")
+
+        # Если feature_columns еще не определены, устанавливаем их
+        if self.feature_columns is None:
+            self.feature_columns = [
+                col for col in self.df.columns
+                if not col.startswith(('long_success', 'short_success'))
+                   and col not in ['open_time', 'close_time']
+            ]
+
+        # Получаем значения без имен признаков
+        data_values = self.df[self.feature_columns].values
+
+        # Заполнение NaN и масштабирование
+        data_values = np.nan_to_num(data_values, nan=np.nanmedian(data_values, axis=0))
+        scaled_data = self.scaler.transform(data_values)  # Теперь работаем с array, а не DataFrame
+
+        # Создание последовательностей
+        X, y_long, y_short = [], [], []
+        for i in range(len(self.df) - data_size_needed_to_work):
+            X.append(scaled_data[i:i + TRAINING_CONFIG['backward_window']])
+
+            current_long_probs = []
+            current_short_probs = []
+
+            for sl, tp in TRAINING_CONFIG['percentage_pairs']:
+                long_col = f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'
+                short_col = f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'
+
+                current_long_probs.append(self.df[long_col].iloc[i + TRAINING_CONFIG['backward_window']])
+                current_short_probs.append(self.df[short_col].iloc[i + TRAINING_CONFIG['backward_window']])
+
+            y_long.append(current_long_probs)
+            y_short.append(current_short_probs)
+
+        X = np.array(X)
+        y = np.stack((y_long, y_short), axis=1)
+
+        return X, y
+
     def build_model(self, input_size: int) -> nn.Module:
         """Создание модели LSTM"""
         output_size = 2 * len(TRAINING_CONFIG['percentage_pairs'])
@@ -313,13 +359,15 @@ class CryptoModelTrainer:
         self.model.eval()
         val_data = TensorDataset(
             torch.FloatTensor(X).to(device),
-            torch.FloatTensor(y).to(device))
-
+            torch.FloatTensor(y).to(device)
+        )
         val_loader = DataLoader(val_data, batch_size=128, shuffle=False)
 
         total_loss = 0
-        correct = 0
-        total = 0
+        correct_per_pair = torch.zeros(len(TRAINING_CONFIG['percentage_pairs']),
+                                       device=device)  # Для каждой пары (sl, tp)
+        total_per_pair = torch.zeros(len(TRAINING_CONFIG['percentage_pairs']),
+                                     device=device)  # Общее количество для каждой пары
 
         with torch.no_grad():
             for x_batch, y_batch in val_loader:
@@ -327,22 +375,30 @@ class CryptoModelTrainer:
                 loss = nn.BCELoss()(outputs, y_batch)
                 total_loss += loss.item()
 
-                # Конвертируем в предсказанные классы (0 или 1)
                 predicted = (outputs > 0.5).float()
 
-                # Сравниваем предсказания с истинными значениями
-                # и считаем количество полностью правильных предсказаний
-                correct += torch.all(predicted == y_batch, dim=2).sum().item()
-                total += y_batch.size(0)  # Количество примеров в батче
+                # Считаем правильные предсказания для каждой пары (sl, tp)
+                for i in range(len(TRAINING_CONFIG['percentage_pairs'])):
+                    correct_per_pair[i] += (predicted[:, :, i] == y_batch[:, :, i]).sum()
+                    total_per_pair[i] += y_batch[:, :, i].numel()
 
-        return total_loss / len(val_loader), correct / total
+        # Вычисляем accuracy для каждой пары
+        val_acc_per_pair = (correct_per_pair / total_per_pair).cpu().numpy()
 
-    def save_model(self, model_folder: str = '', model_name: str = 'model.pth') -> None:
+        # Выводим результаты
+        for i, (sl, tp) in enumerate(TRAINING_CONFIG['percentage_pairs']):
+            print(f"Val Acc (sl={sl:.4f}, tp={tp:.4f}): {val_acc_per_pair[i]:.4f}")
+
+        # Средняя accuracy по всем парам (опционально)
+        mean_val_acc = val_acc_per_pair.mean()
+        return total_loss / len(val_loader), mean_val_acc
+
+    def save_model(self, model_folder: str = '') -> None:
         """Сохранение модели и всех связанных данных"""
         if not os.path.exists(model_folder):
             os.makedirs(model_folder)
 
-        torch.save(self.model.state_dict(), os.path.join(model_folder, model_name))
+        torch.save(self.model.state_dict(), os.path.join(model_folder, 'model.pth'))
         np.save(os.path.join(model_folder, 'scaler_min.npy'), self.scaler.min_)
         np.save(os.path.join(model_folder, 'scaler_scale.npy'), self.scaler.scale_)
 
@@ -352,12 +408,15 @@ class CryptoModelTrainer:
         with open(os.path.join(model_folder, 'feature_columns.json'), 'w') as f:
             json.dump(self.feature_columns, f)
 
-    def load_model(self, model_folder: str = '', model_name: str = 'model.pth') -> None:
+    def load_model(self, model_folder: str = '') -> None:
         """Загрузка модели и всех связанных данных"""
+        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
+            self.feature_columns = json.load(f)
+
         # Сначала создаем модель с правильной архитектурой
         self.model = self.build_model(input_size=len(self.feature_columns))
         # Затем загружаем веса
-        self.model.load_state_dict(torch.load(os.path.join(model_folder, model_name)))
+        self.model.load_state_dict(torch.load(os.path.join(model_folder, 'model.pth')))
         self.model.to(device)
 
         self.scaler.min_ = np.load(os.path.join(model_folder, 'scaler_min.npy'))
@@ -367,12 +426,7 @@ class CryptoModelTrainer:
         with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
             TRAINING_CONFIG = pickle.load(f)
 
-        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
-            self.feature_columns = json.load(f)
-
-    def evaluate_on_new_data(self, X_train: np.ndarray, X_test: np.ndarray,
-                             y_train: np.ndarray, y_test: np.ndarray) -> None:
-        """Оценка модели на новых данных"""
+    def evaluate_on_new_data(self, X_test: np.ndarray, y_test: np.ndarray) -> None:
         X_test_tensor = torch.FloatTensor(X_test).to(device)
         y_test_tensor = torch.FloatTensor(y_test).to(device)
 
@@ -383,34 +437,36 @@ class CryptoModelTrainer:
         criterion = nn.BCELoss()
 
         total_loss = 0.0
-        correct = 0
-        total = 0
+        correct_per_pair = torch.zeros(len(TRAINING_CONFIG['percentage_pairs']), device=device)
+        total_per_pair = torch.zeros(len(TRAINING_CONFIG['percentage_pairs']), device=device)
 
         with torch.no_grad():
             for inputs, targets in test_loader:
                 outputs = self.model(inputs)
                 loss = criterion(outputs, targets)
-
                 total_loss += loss.item() * inputs.size(0)
 
-                # Вычисление точности
                 predicted = (outputs > 0.5).float()
-                correct += torch.all(predicted == targets, dim=2).sum().item()
-                total += targets.size(0) * targets.size(2)  # Учитываем все предсказания
 
-        test_loss = total_loss / len(test_loader.dataset)
-        test_acc = correct / total
+                for i in range(len(TRAINING_CONFIG['percentage_pairs'])):
+                    correct_per_pair[i] += (predicted[:, :, i] == targets[:, :, i]).sum()
+                    total_per_pair[i] += targets[:, :, i].numel()
 
-        print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}")
+        # Accuracy для каждой пары
+        test_acc_per_pair = (correct_per_pair / total_per_pair).cpu().numpy()
 
-    def run_pipeline(self, csv_path, mode="training") -> None:
+        # Вывод результатов
+        print(f"Test Loss: {total_loss / len(test_loader.dataset):.4f}")
+        for i, (sl, tp) in enumerate(TRAINING_CONFIG['percentage_pairs']):
+            print(f"Test Acc (sl={sl:.4f}, tp={tp:.4f}): {test_acc_per_pair[i]:.4f}")
+
+        # Средняя accuracy (опционально)
+        mean_test_acc = test_acc_per_pair.mean()
+        print(f"Mean Test Accuracy: {mean_test_acc:.4f}")
+
+    def run_training_pipeline(self, csv_path, model_folder) -> None:
         """Запуск пайплайна для обучения или оценки обученной модели"""
-
-        if mode == 'training':
-            print(f"Подготовка к обучению модели на данных {csv_path}...")
-        elif mode == 'evaluating':
-            print(f"Подготовка к тестированию обученной модели на данных {csv_path}...")
-
+        print(f"Подготовка к обучению модели на данных {csv_path}...")
         print("1. Загрузка данных")
         self.load_trading_data_from_csv(csv_path)
 
@@ -420,25 +476,38 @@ class CryptoModelTrainer:
         print("3. Формирование наборов данных для передачи в модель")
         X_train, X_test, y_train, y_test = self.prepare_train_test_split()
 
-        if mode == "training":
-            print("4. Обучение модели")
-            self.train_model(X_train, X_test, y_train, y_test)
+        print("4. Обучение модели")
+        self.train_model(X_train, X_test, y_train, y_test)
 
-            print("5. Сохранение модели")
-            self.save_model(model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+        print(f"5. Сохранение модели в папку {model_folder}")
+        self.save_model(model_folder=os.path.join('models', model_folder))
 
-            print("Готово! Модель обучена и сохранена.")
+        print("Готово! Модель обучена и сохранена.")
 
-        elif mode == "evaluating":
-            print("4. Проверка обученной модели на других данных")
-            self.evaluate_on_new_data(X_train, X_test, y_train, y_test)
+    def run_evaluating_pipeline(self, csv_path, model_folder) -> None:
+        print(f"Подготовка к тестированию обученной модели из папки {model_folder} на данных {csv_path}...")
 
-            print("Готово! Модель протестирована.")
-        else:
-            raise ValueError("Неизвестный режим работы")
+        print("1. Загрузка модели")
+        self.load_model(model_folder=model_folder)
+
+        print("2. Загрузка данных из датафрейма")
+        self.load_trading_data_from_csv(csv_path)
+
+        print("3. Насыщение датафрейма фичами")
+        self.create_features()
+
+        print("4. Формирование наборов данных для передачи в модель")
+        X_test, y_test = self.prepare_validation_data()
+
+        print("5. Проверка обученной модели на других данных")
+        self.evaluate_on_new_data(X_test, y_test)
+
+        print("Готово! Модель протестирована.")
 
 
 if __name__ == "__main__":
     trainer = CryptoModelTrainer()
-    trainer.run_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'], mode="training")
-    trainer.run_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'], mode="evaluating")
+    # trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
+    #                                 model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+    trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
+                                    model_folder=os.path.join('models', f"model-4month-16-05-2025 11-37-14"))
