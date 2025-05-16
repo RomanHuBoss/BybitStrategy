@@ -483,7 +483,7 @@ class CryptoModelTrainer:
         self.train_model(X_train, X_test, y_train, y_test)
 
         print(f"5. Сохранение модели в папку {model_folder}")
-        self.save_model(model_folder=os.path.join('models', model_folder))
+        self.save_model(model_folder=model_folder)
 
         print("Готово! Модель обучена и сохранена.")
 
@@ -510,7 +510,7 @@ class CryptoModelTrainer:
 
 if __name__ == "__main__":
     trainer = CryptoModelTrainer()
-    trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
-                                     model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
-    # trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
-    #                                 model_folder=os.path.join('models', f"model-4month-16-05-2025 11-37-14"))
+    # trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
+    #                                  model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+    trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
+                                    model_folder=os.path.join('models', f"16-05-2025 23-38-34"))
