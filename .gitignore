@@ -5,3 +5,5 @@
 *.log
 *.csv
 /settings_private.py
+/models/
+/downloads/
