@@ -73,12 +73,13 @@ class LSTMModel(nn.Module):
 
 
 class CryptoModelPredictor:
-    def __init__(self, config_path: Optional[str] = None):
-        self.df: Optional[pd.DataFrame] = None
-        self.model: Optional[LSTMModel] = None
-        self.scaler = MinMaxScaler(feature_range=(0, 1))
-        self.feature_columns: Optional[List[str]] = None
-        self.training_config = self._load_config(config_path)
+    def __init__(self, threshold = 0.7):
+        self.threshold = threshold
+        self.df = None
+        self.model = None
+        self.scaler = None
+        self.feature_columns = None
+        self.training_config = None
 
     def _load_config(self, path: Optional[str]) -> Dict:
         """Загружает конфиг из файла или использует значения по умолчанию"""
@@ -235,6 +236,7 @@ class CryptoModelPredictor:
 
         with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
             self.training_config = pickle.load(f)
+            self.scaler = self.training_config['scaler']
 
         self.model = self._build_model(len(self.feature_columns))
         self.model.load_state_dict(torch.load(os.path.join(model_folder, 'model.pth')))
@@ -267,6 +269,9 @@ class CryptoModelPredictor:
         with torch.no_grad():
             preds = self.model(torch.FloatTensor(X).to(device)).cpu().numpy()
 
+        def safe_median(arr):
+            return float(np.median(arr)) if len(arr) > 0 else 0.0
+
         def safe_max(arr):
             return float(np.max(arr)) if len(arr) > 0 else 0.0
 
@@ -279,6 +284,10 @@ class CryptoModelPredictor:
             'max_values': {
                 'long': {'max_sl': 0.0, 'max_tp': 0.0},
                 'short': {'max_sl': 0.0, 'max_tp': 0.0}
+            },
+            'median_values': {  # Добавлен новый блок для медианных значений
+                'long': {'median_sl': 0.0, 'median_tp': 0.0},
+                'short': {'median_sl': 0.0, 'median_tp': 0.0}
             }
         }
 
@@ -288,29 +297,36 @@ class CryptoModelPredictor:
             result['long'][key] = float(long_probs[i])
             result['short'][key] = float(short_probs[i])
 
-        # Вычисляем максимальные значения для prob > 0.55
+        # Вычисляем значения для prob > 0.7
         long_sl_values = [
             sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
-            if long_probs[i] > 0.55
+            if long_probs[i] > 0.7
         ]
         long_tp_values = [
             tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
-            if long_probs[i] > 0.55
+            if long_probs[i] > 0.7
         ]
 
         short_sl_values = [
             sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
-            if short_probs[i] > 0.55
+            if short_probs[i] > 0.7
         ]
         short_tp_values = [
             tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
-            if short_probs[i] > 0.55
+            if short_probs[i] > 0.7
         ]
 
+        # Максимальные значения
         result['max_values']['long']['max_sl'] = safe_max(long_sl_values)
         result['max_values']['long']['max_tp'] = safe_max(long_tp_values)
         result['max_values']['short']['max_sl'] = safe_max(short_sl_values)
         result['max_values']['short']['max_tp'] = safe_max(short_tp_values)
+
+        # Медианные значения
+        result['median_values']['long']['median_sl'] = safe_median(long_sl_values)
+        result['median_values']['long']['median_tp'] = safe_median(long_tp_values)
+        result['median_values']['short']['median_sl'] = safe_median(short_sl_values)
+        result['median_values']['short']['median_tp'] = safe_median(short_tp_values)
 
         return result
 
@@ -327,26 +343,32 @@ class CryptoModelPredictor:
         # Логируем результаты
         logger.info("\nРезультаты для LONG:")
         for strat, prob in prediction['long'].items():
-            if prob > 0.55:
+            if prob > self.threshold:
                 logger.info(f"{strat}: {prob:.2%}")
 
         logger.info("\nРезультаты для SHORT:")
         for strat, prob in prediction['short'].items():
-            if prob > 0.55:
+            if prob > self.threshold:
                 logger.info(f"{strat}: {prob:.2%}")
 
-        logger.info("\nМаксимальные значения:")
+        logger.info(f"\nМаксимальные значения (prob > {self.threshold * 100}%):")
         logger.info(
             f"LONG: SL={prediction['max_values']['long']['max_sl']:.2%}, TP={prediction['max_values']['long']['max_tp']:.2%}")
         logger.info(
             f"SHORT: SL={prediction['max_values']['short']['max_sl']:.2%}, TP={prediction['max_values']['short']['max_tp']:.2%}")
 
+        logger.info(f"\nМедианные значения (prob > {self.threshold * 100}%):")
+        logger.info(
+            f"LONG: SL={prediction['median_values']['long']['median_sl']:.2%}, TP={prediction['median_values']['long']['median_tp']:.2%}")
+        logger.info(
+            f"SHORT: SL={prediction['median_values']['short']['median_sl']:.2%}, TP={prediction['median_values']['short']['median_tp']:.2%}")
+
         return prediction
 
 
 if __name__ == "__main__":
-    predictor = CryptoModelPredictor()
+    predictor = CryptoModelPredictor(threshold=0.7)
     prediction = predictor.run_prediction_pipeline(
-        csv_path=os.path.join("downloads", "BOBAUSDT_1m_2025-05-16-20-19.csv"),
-        model_folder=os.path.join("models", "model-4month-16-05-2025 11-37-14")
+        csv_path=os.path.join("downloads", "BOBAUSDT_1m_2025-05-16-21-53.csv"),
+        model_folder=os.path.join("models", "16-05-2025 23-38-34")
     )
