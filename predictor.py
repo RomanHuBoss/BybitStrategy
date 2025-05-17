@@ -415,22 +415,22 @@ class CryptoModelPredictor:
                     print(
                         f"{direction}: SL={prediction['median_values'][direction]['median_sl']:.2%}, TP={prediction['median_values'][direction]['median_tp']:.2%}")
 
-            # Выводим обнаруженные паттерны
-            # if prediction['chart_patterns']:
-            #     print("\nОбнаруженные графические паттерны:")
-            #     for pattern, active in prediction['chart_patterns'].items():
-            #         if active:
-            #             print(f"- {pattern}")
-            # else:
-            #     print("\nГрафические паттерны не обнаружены")
+                    #Выводим обнаруженные паттерны
+                    if prediction['chart_patterns']:
+                        print("\nОбнаруженные графические паттерны:")
+                        for pattern, active in prediction['chart_patterns'].items():
+                            if active:
+                                print(f"- {pattern}")
+                    else:
+                        print("\nГрафические паттерны не обнаружены")
 
 
 if __name__ == "__main__":
-    model_folder = os.path.join("models", "3m-30forward-20backward-17-05-2025 18-45-47")
-    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.5)
+    model_folder = os.path.join("models", "3m-60forward-10backward-17-05-2025 22-17-14")
+    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.6)
 
 
     prediction = predictor.run_csv_prediction_pipeline(
         #csv_path=os.path.join("historical_data", "BTCUSDT", "3m", "daily", "BTCUSDT-3m-2025-05-05.csv"),
-        csv_path=os.path.join("downloads", "GODSUSDT_3m_2025-05-17-19-44.csv"),
+        csv_path=os.path.join("downloads", "OBTUSDT_3m_2025-05-17-20-31.csv"),
     )
