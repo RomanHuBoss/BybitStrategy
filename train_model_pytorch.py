@@ -131,8 +131,8 @@ class CryptoModelTrainer:
         low_prices = self.df['low'].values
 
         # Параметры для обнаружения паттернов
-        lookback = 20  # Количество свечей для анализа паттерна
-        min_pattern_length = 5  # Минимальная длина паттерна в свечах
+        lookback = TRAINING_CONFIG['chart_patterns']['lookback_window']  # Количество свечей для анализа паттерна
+        min_pattern_length = TRAINING_CONFIG['chart_patterns']['min_pattern_length']  # Минимальная длина паттерна в свечах
 
         for i in range(lookback, len(self.df)):
             current_window_high = high_prices[i - lookback:i]
@@ -629,5 +629,5 @@ if __name__ == "__main__":
     trainer = CryptoModelTrainer()
     trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
                                       model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
-    # trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
-    #                                 model_folder=os.path.join('models', f"16-05-2025 23-38-34"))
+    trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
+                                     model_folder=os.path.join('models', f"16-05-2025 23-38-34"))

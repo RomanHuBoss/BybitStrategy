@@ -18,6 +18,13 @@ from torch.utils.data import DataLoader, TensorDataset
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Настройка логгирования
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(handler)
+
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size: int, output_size: int):
@@ -69,12 +76,12 @@ class LSTMModel(nn.Module):
 
 
 class CryptoModelPredictor:
-    def __init__(self, model_folder, threshold = 0.7):
-        self.model_folder=model_folder
+    def __init__(self, model_folder, threshold=0.7):
+        self.model_folder = model_folder
         self.threshold = threshold
         self.df = None
         self.model = None
-        self.scaler = None
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
         self.feature_columns = None
         self.training_config = None
 
@@ -82,12 +89,14 @@ class CryptoModelPredictor:
 
     def load_model(self, model_folder: str) -> None:
         """Загружает модель и связанные данные"""
-        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
-            self.feature_columns = json.load(f)
-
         with open(os.path.join(model_folder, 'training_config.pkl'), 'rb') as f:
             self.training_config = pickle.load(f)
-            self.scaler = self.training_config['scaler']
+
+        if 'percentage_pairs' not in self.training_config:
+            raise ValueError("Конфигурация обучения должна содержать 'percentage_pairs'.")
+
+        with open(os.path.join(model_folder, 'feature_columns.json'), 'r') as f:
+            self.feature_columns = json.load(f)
 
         self.model = self._build_model(len(self.feature_columns))
         self.model.load_state_dict(torch.load(os.path.join(model_folder, 'model.pth')))
@@ -119,6 +128,112 @@ class CryptoModelPredictor:
 
         self._add_time_features()
         self._add_technical_indicators()
+        self._add_chart_patterns()
+
+    def _add_chart_patterns(self) -> None:
+        """Добавление признаков графических паттернов"""
+        if self.df is None:
+            raise ValueError("Данные не загружены")
+
+        # Создаем временный словарь для новых колонок
+        new_columns = {
+            'head_shoulders': np.zeros(len(self.df)),
+            'double_top': np.zeros(len(self.df)),
+            'double_bottom': np.zeros(len(self.df)),
+            'triangle_ascending': np.zeros(len(self.df)),
+            'triangle_descending': np.zeros(len(self.df)),
+            'wedge_rising': np.zeros(len(self.df)),
+            'wedge_falling': np.zeros(len(self.df))
+        }
+
+        # Анализируем ценовые движения для выявления паттернов
+        close_prices = self.df['close'].values
+        high_prices = self.df['high'].values
+        low_prices = self.df['low'].values
+
+        # Параметры для обнаружения паттернов
+        lookback = self.training_config['chart_patterns']['lookback_window']  # Количество свечей для анализа паттерна
+        min_pattern_length = self.training_config['chart_patterns']['min_pattern_length']  # Минимальная длина паттерна в свечах
+
+        for i in range(lookback, len(self.df)):
+            current_window_high = high_prices[i - lookback:i]
+            current_window_low = low_prices[i - lookback:i]
+            current_window_close = close_prices[i - lookback:i]
+
+            # 1. Голова и плечи (Head and Shoulders)
+            left_shoulder = np.argmax(current_window_high[:lookback // 3])
+            head = np.argmax(current_window_high[lookback // 3:2 * lookback // 3]) + lookback // 3
+            right_shoulder = np.argmax(current_window_high[2 * lookback // 3:]) + 2 * lookback // 3
+
+            neckline = (current_window_low[left_shoulder] + current_window_low[right_shoulder]) / 2
+
+            if (left_shoulder < head > right_shoulder and
+                    current_window_high[left_shoulder] < current_window_high[head] > current_window_high[
+                        right_shoulder] and
+                    abs(current_window_high[left_shoulder] - current_window_high[right_shoulder]) < 0.01 *
+                    current_window_high[head] and
+                    current_window_close[-1] < neckline):
+                new_columns['head_shoulders'][i] = 1
+
+            # 2. Двойная вершина (Double Top)
+            first_top = np.argmax(current_window_high[:lookback // 2])
+            second_top = np.argmax(current_window_high[lookback // 2:]) + lookback // 2
+            valley = np.argmin(current_window_low[first_top:second_top]) + first_top
+
+            if (first_top < second_top and
+                    abs(current_window_high[first_top] - current_window_high[second_top]) < 0.01 * current_window_high[
+                        first_top] and
+                    current_window_close[-1] < current_window_low[valley]):
+                new_columns['double_top'][i] = 1
+
+            # 3. Двойное дно (Double Bottom)
+            first_bottom = np.argmin(current_window_low[:lookback // 2])
+            second_bottom = np.argmin(current_window_low[lookback // 2:]) + lookback // 2
+            peak = np.argmax(current_window_high[first_bottom:second_bottom]) + first_bottom
+
+            if (first_bottom < second_bottom and
+                    abs(current_window_low[first_bottom] - current_window_low[second_bottom]) < 0.01 *
+                    current_window_low[first_bottom] and
+                    current_window_close[-1] > current_window_high[peak]):
+                new_columns['double_bottom'][i] = 1
+
+            # 4. Восходящий треугольник (Ascending Triangle)
+            resistance = np.max(current_window_high)
+            higher_lows = all(
+                current_window_low[j] > current_window_low[j - 1] for j in range(1, len(current_window_low)))
+
+            if (higher_lows and
+                    np.std(current_window_high) < 0.005 * resistance and
+                    current_window_close[-1] > resistance):
+                new_columns['triangle_ascending'][i] = 1
+
+            # 5. Нисходящий треугольник (Descending Triangle)
+            support = np.min(current_window_low)
+            lower_highs = all(
+                current_window_high[j] < current_window_high[j - 1] for j in range(1, len(current_window_high)))
+
+            if (lower_highs and
+                    np.std(current_window_low) < 0.005 * support and
+                    current_window_close[-1] < support):
+                new_columns['triangle_descending'][i] = 1
+
+            # 6. Восходящий клин (Rising Wedge)
+            if (all(current_window_high[j] > current_window_high[j - 1] for j in range(1, len(current_window_high))) and
+                    all(current_window_low[j] > current_window_low[j - 1] for j in
+                        range(1, len(current_window_low))) and
+                    (current_window_close[-1] < current_window_low[-1])):
+                new_columns['wedge_rising'][i] = 1
+
+            # 7. Нисходящий клин (Falling Wedge)
+            if (all(current_window_high[j] < current_window_high[j - 1] for j in range(1, len(current_window_high))) and
+                    all(current_window_low[j] < current_window_low[j - 1] for j in
+                        range(1, len(current_window_low))) and
+                    (current_window_close[-1] > current_window_high[-1])):
+                new_columns['wedge_falling'][i] = 1
+
+        # Конвертируем словарь в DataFrame и объединяем с основным
+        new_columns_df = pd.DataFrame(new_columns)
+        self.df = pd.concat([self.df, new_columns_df], axis=1)
 
     def _add_time_features(self) -> None:
         """Добавляет временные фичи с циклическим кодированием"""
@@ -175,7 +290,6 @@ class CryptoModelPredictor:
         if np.isnan(data).any():
             data = np.nan_to_num(data, nan=np.nanmedian(data, axis=0))
 
-        self.scaler.fit(data)
         scaled = self.scaler.transform(data)
 
         X, y_long, y_short = [], [], []
@@ -186,6 +300,7 @@ class CryptoModelPredictor:
                 self.df[f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
                 for sl, tp in self.training_config['percentage_pairs']
             ]
+
             short_probs = [
                 self.df[f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
                 for sl, tp in self.training_config['percentage_pairs']
@@ -201,9 +316,9 @@ class CryptoModelPredictor:
         output_size = 2 * len(self.training_config['percentage_pairs'])
         return LSTMModel(input_size, output_size).to(device)
 
-    def predict_last_30_candles(self) -> Dict:
-        """Прогнозирует для последних 30 свечей"""
-        required = self.training_config['backward_window'] + 30
+    def predict_last_candles(self) -> Dict:
+        """Прогнозирует для последних свечей"""
+        required = self.training_config['backward_window'] + self.training_config['backward_window']
         if len(self.df) < required:
             raise ValueError(f"Нужно минимум {required} свечей")
 
@@ -213,7 +328,7 @@ class CryptoModelPredictor:
 
         X = np.array([
             scaled[i:i + self.training_config['backward_window']]
-            for i in range(30)
+            for i in range(self.training_config['backward_window'])
         ])
 
         with torch.no_grad():
@@ -235,10 +350,11 @@ class CryptoModelPredictor:
                 'long': {'max_sl': 0.0, 'max_tp': 0.0},
                 'short': {'max_sl': 0.0, 'max_tp': 0.0}
             },
-            'median_values': {  # Добавлен новый блок для медианных значений
+            'median_values': {
                 'long': {'median_sl': 0.0, 'median_tp': 0.0},
                 'short': {'median_sl': 0.0, 'median_tp': 0.0}
-            }
+            },
+            'chart_patterns': self._get_last_chart_patterns()  # Добавляем информацию о паттернах
         }
 
         # Заполняем вероятности
@@ -247,23 +363,23 @@ class CryptoModelPredictor:
             result['long'][key] = float(long_probs[i])
             result['short'][key] = float(short_probs[i])
 
-        # Вычисляем значения для prob > 0.7
+        # Вычисляем значения для prob > threshold
         long_sl_values = [
             sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
-            if long_probs[i] > 0.7
+            if long_probs[i] > self.threshold
         ]
         long_tp_values = [
             tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
-            if long_probs[i] > 0.7
+            if long_probs[i] > self.threshold
         ]
 
         short_sl_values = [
             sl for i, (sl, _) in enumerate(self.training_config['percentage_pairs'])
-            if short_probs[i] > 0.7
+            if short_probs[i] > self.threshold
         ]
         short_tp_values = [
             tp for i, (_, tp) in enumerate(self.training_config['percentage_pairs'])
-            if short_probs[i] > 0.7
+            if short_probs[i] > self.threshold
         ]
 
         # Максимальные значения
@@ -280,6 +396,26 @@ class CryptoModelPredictor:
 
         return result
 
+    def _get_last_chart_patterns(self) -> Dict[str, bool]:
+        """Возвращает обнаруженные графические паттерны на последней свече"""
+        if self.df is None or len(self.df) == 0:
+            return {}
+
+        last_row = self.df.iloc[-1]
+        patterns = {
+            'head_shoulders': bool(last_row['head_shoulders']),
+            'double_top': bool(last_row['double_top']),
+            'double_bottom': bool(last_row['double_bottom']),
+            'triangle_ascending': bool(last_row['triangle_ascending']),
+            'triangle_descending': bool(last_row['triangle_descending']),
+            'wedge_rising': bool(last_row['wedge_rising']),
+            'wedge_falling': bool(last_row['wedge_falling'])
+        }
+
+        # Фильтруем только активные паттерны
+        active_patterns = {name: active for name, active in patterns.items() if active}
+        return active_patterns
+
     def run_csv_prediction_pipeline(self, csv_path: str) -> Dict:
         """Полный цикл прогнозирования"""
         print(f"Запуск прогноза для {csv_path}")
@@ -287,7 +423,7 @@ class CryptoModelPredictor:
         self.load_trading_data_from_csv(csv_path)
         self.create_features()
 
-        prediction = self.predict_last_30_candles()
+        prediction = self.predict_last_candles()
 
         # Логируем результаты
         print("\nРезультаты для LONG:")
@@ -312,13 +448,23 @@ class CryptoModelPredictor:
         print(
             f"SHORT: SL={prediction['median_values']['short']['median_sl']:.2%}, TP={prediction['median_values']['short']['median_tp']:.2%}")
 
+        # Выводим обнаруженные паттерны
+        if prediction['chart_patterns']:
+            print("\nОбнаруженные графические паттерны:")
+            for pattern, active in prediction['chart_patterns'].items():
+                if active:
+                    print(f"- {pattern}")
+        else:
+            print("\nГрафические паттерны не обнаружены")
+
         return prediction
 
 
 if __name__ == "__main__":
-    model_folder = os.path.join("models", "3m-100backward-17-05-2025 13-36-25")
-    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.7)
+    model_folder = os.path.join("models", "3m-30forward-30backward-17-05-2025 16-28-08")
+    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.3)
+
 
     prediction = predictor.run_csv_prediction_pipeline(
-        csv_path=os.path.join("downloads", "BTCUSDT_3m_2025-05-17-13-07.csv"),
+        csv_path=os.path.join("downloads", "FARTCOINUSDT_3m_2025-05-17-14-57.csv"),
     )
