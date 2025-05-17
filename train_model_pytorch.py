@@ -366,13 +366,9 @@ class CryptoModelTrainer:
             y_long.append(current_long_probs)
             y_short.append(current_short_probs)
 
-        X = np.array(X)
-        y_long = np.array(y_long)
-        y_short = np.array(y_short)
-
         return train_test_split(
             np.array(X),
-            np.stack((y_long, y_short), axis=1),
+            np.stack((np.array(y_long), np.array(y_short)), axis=1),
             test_size=0.2,
             random_state=42
         )

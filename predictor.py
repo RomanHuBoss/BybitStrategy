@@ -273,44 +273,6 @@ class CryptoModelPredictor:
 
         self.df = self.df.bfill().ffill().dropna()
 
-    def prepare_validation_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Подготавливает данные для валидации"""
-        required = self.training_config['backward_window'] + self.training_config['forward_window']
-        if len(self.df) < required:
-            raise ValueError(f"Нужно минимум {required} свечей")
-
-        if self.feature_columns is None:
-            self.feature_columns = [
-                col for col in self.df.columns
-                if not col.startswith(('long_success', 'short_success'))
-                   and col not in ['open_time', 'close_time']
-            ]
-
-        data = self.df[self.feature_columns].values
-        if np.isnan(data).any():
-            data = np.nan_to_num(data, nan=np.nanmedian(data, axis=0))
-
-        scaled = self.scaler.transform(data)
-
-        X, y_long, y_short = [], [], []
-        for i in range(len(self.df) - required):
-            X.append(scaled[i:i + self.training_config['backward_window']])
-
-            long_probs = [
-                self.df[f'long_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
-                for sl, tp in self.training_config['percentage_pairs']
-            ]
-
-            short_probs = [
-                self.df[f'short_success_sl_{sl:.4f}_tp_{tp:.4f}'].iloc[i + self.training_config['backward_window']]
-                for sl, tp in self.training_config['percentage_pairs']
-            ]
-
-            y_long.append(long_probs)
-            y_short.append(short_probs)
-
-        return np.array(X), np.stack((y_long, y_short), axis=1)
-
     def _build_model(self, input_size: int) -> LSTMModel:
         """Создает новую модель"""
         output_size = 2 * len(self.training_config['percentage_pairs'])
@@ -318,7 +280,7 @@ class CryptoModelPredictor:
 
     def predict_last_candles(self) -> Dict:
         """Прогнозирует для последних свечей"""
-        required = self.training_config['backward_window'] + self.training_config['backward_window']
+        required = 2 * self.training_config['backward_window']
         if len(self.df) < required:
             raise ValueError(f"Нужно минимум {required} свечей")
 
@@ -423,48 +385,52 @@ class CryptoModelPredictor:
         self.load_trading_data_from_csv(csv_path)
         self.create_features()
 
-        prediction = self.predict_last_candles()
+        df_copy =self.df.copy()
 
-        # Логируем результаты
-        print("\nРезультаты для LONG:")
-        for strat, prob in prediction['long'].items():
-            if prob > self.threshold:
-                print(f"{strat}: {prob:.2%}")
+        for i in range(0, len(df_copy)):
+            first_number = i
+            last_number = i + self.training_config['backward_window'] * 2
 
-        print("\nРезультаты для SHORT:")
-        for strat, prob in prediction['short'].items():
-            if prob > self.threshold:
-                print(f"{strat}: {prob:.2%}")
+            if last_number > len(df_copy):
+                continue
 
-        print(f"\nМаксимальные значения (prob > {self.threshold * 100}%):")
-        print(
-            f"LONG: SL={prediction['max_values']['long']['max_sl']:.2%}, TP={prediction['max_values']['long']['max_tp']:.2%}")
-        print(
-            f"SHORT: SL={prediction['max_values']['short']['max_sl']:.2%}, TP={prediction['max_values']['short']['max_tp']:.2%}")
+            self.df = df_copy[first_number: first_number + last_number]
+            prediction = self.predict_last_candles()
 
-        print(f"\nМедианные значения (prob > {self.threshold * 100}%):")
-        print(
-            f"LONG: SL={prediction['median_values']['long']['median_sl']:.2%}, TP={prediction['median_values']['long']['median_tp']:.2%}")
-        print(
-            f"SHORT: SL={prediction['median_values']['short']['median_sl']:.2%}, TP={prediction['median_values']['short']['median_tp']:.2%}")
+            for direction in ['long', 'short']:
+                if any(prob > self.threshold for prob in prediction[direction].values()):
+                    print('---')
+                    print(f"Результаты для {direction}:")
+                    print(f"Свеча от даты {self.df['open_time'].iloc[-1]}")
 
-        # Выводим обнаруженные паттерны
-        if prediction['chart_patterns']:
-            print("\nОбнаруженные графические паттерны:")
-            for pattern, active in prediction['chart_patterns'].items():
-                if active:
-                    print(f"- {pattern}")
-        else:
-            print("\nГрафические паттерны не обнаружены")
+                    for strat, prob in prediction[direction].items():
+                        if prob > self.threshold:
+                            print(f"{strat}: {prob:.2%}")
 
-        return prediction
+                    print(f"Максимальные значения (prob > {self.threshold * 100}%):")
+                    print(
+                        f"{direction}: SL={prediction['max_values'][direction]['max_sl']:.2%}, TP={prediction['max_values'][direction]['max_tp']:.2%}")
+
+                    print(f"Медианные значения (prob > {self.threshold * 100}%):")
+                    print(
+                        f"{direction}: SL={prediction['median_values'][direction]['median_sl']:.2%}, TP={prediction['median_values'][direction]['median_tp']:.2%}")
+
+            # Выводим обнаруженные паттерны
+            # if prediction['chart_patterns']:
+            #     print("\nОбнаруженные графические паттерны:")
+            #     for pattern, active in prediction['chart_patterns'].items():
+            #         if active:
+            #             print(f"- {pattern}")
+            # else:
+            #     print("\nГрафические паттерны не обнаружены")
 
 
 if __name__ == "__main__":
-    model_folder = os.path.join("models", "3m-30forward-30backward-17-05-2025 16-28-08")
-    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.3)
+    model_folder = os.path.join("models", "3m-30forward-20backward-17-05-2025 18-45-47")
+    predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.5)
 
 
     prediction = predictor.run_csv_prediction_pipeline(
-        csv_path=os.path.join("downloads", "FARTCOINUSDT_3m_2025-05-17-14-57.csv"),
+        #csv_path=os.path.join("historical_data", "BTCUSDT", "3m", "daily", "BTCUSDT-3m-2025-05-05.csv"),
+        csv_path=os.path.join("downloads", "GODSUSDT_3m_2025-05-17-19-44.csv"),
     )
