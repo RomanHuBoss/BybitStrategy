@@ -106,7 +106,113 @@ class CryptoModelTrainer:
 
         self._add_time_features_to_df()
         self._add_technical_indicators_to_df()
+        self._add_chart_patterns_to_df()
         self._analyze_price_movements_on_df()
+
+    def _add_chart_patterns_to_df(self) -> None:
+        """Добавление признаков графических паттернов к внутреннему датафрейму"""
+        if self.df is None:
+            raise ValueError("Внутренний датафрейм не загружен")
+
+        # Создаем временный словарь для новых колонок
+        new_columns = {
+            'head_shoulders': np.zeros(len(self.df)),
+            'double_top': np.zeros(len(self.df)),
+            'double_bottom': np.zeros(len(self.df)),
+            'triangle_ascending': np.zeros(len(self.df)),
+            'triangle_descending': np.zeros(len(self.df)),
+            'wedge_rising': np.zeros(len(self.df)),
+            'wedge_falling': np.zeros(len(self.df))
+        }
+
+        # Анализируем ценовые движения для выявления паттернов
+        close_prices = self.df['close'].values
+        high_prices = self.df['high'].values
+        low_prices = self.df['low'].values
+
+        # Параметры для обнаружения паттернов
+        lookback = 20  # Количество свечей для анализа паттерна
+        min_pattern_length = 5  # Минимальная длина паттерна в свечах
+
+        for i in range(lookback, len(self.df)):
+            current_window_high = high_prices[i - lookback:i]
+            current_window_low = low_prices[i - lookback:i]
+            current_window_close = close_prices[i - lookback:i]
+
+            # 1. Голова и плечи (Head and Shoulders)
+            left_shoulder = np.argmax(current_window_high[:lookback // 3])
+            head = np.argmax(current_window_high[lookback // 3:2 * lookback // 3]) + lookback // 3
+            right_shoulder = np.argmax(current_window_high[2 * lookback // 3:]) + 2 * lookback // 3
+
+            neckline = (current_window_low[left_shoulder] + current_window_low[right_shoulder]) / 2
+
+            if (left_shoulder < head > right_shoulder and
+                    current_window_high[left_shoulder] < current_window_high[head] > current_window_high[
+                        right_shoulder] and
+                    abs(current_window_high[left_shoulder] - current_window_high[right_shoulder]) < 0.01 *
+                    current_window_high[head] and
+                    current_window_close[-1] < neckline):
+                new_columns['head_shoulders'][i] = 1
+
+            # 2. Двойная вершина (Double Top)
+            first_top = np.argmax(current_window_high[:lookback // 2])
+            second_top = np.argmax(current_window_high[lookback // 2:]) + lookback // 2
+            valley = np.argmin(current_window_low[first_top:second_top]) + first_top
+
+            if (first_top < second_top and
+                    abs(current_window_high[first_top] - current_window_high[second_top]) < 0.01 * current_window_high[
+                        first_top] and
+                    current_window_close[-1] < current_window_low[valley]):
+                new_columns['double_top'][i] = 1
+
+            # 3. Двойное дно (Double Bottom)
+            first_bottom = np.argmin(current_window_low[:lookback // 2])
+            second_bottom = np.argmin(current_window_low[lookback // 2:]) + lookback // 2
+            peak = np.argmax(current_window_high[first_bottom:second_bottom]) + first_bottom
+
+            if (first_bottom < second_bottom and
+                    abs(current_window_low[first_bottom] - current_window_low[second_bottom]) < 0.01 *
+                    current_window_low[first_bottom] and
+                    current_window_close[-1] > current_window_high[peak]):
+                new_columns['double_bottom'][i] = 1
+
+            # 4. Восходящий треугольник (Ascending Triangle)
+            resistance = np.max(current_window_high)
+            higher_lows = all(
+                current_window_low[j] > current_window_low[j - 1] for j in range(1, len(current_window_low)))
+
+            if (higher_lows and
+                    np.std(current_window_high) < 0.005 * resistance and
+                    current_window_close[-1] > resistance):
+                new_columns['triangle_ascending'][i] = 1
+
+            # 5. Нисходящий треугольник (Descending Triangle)
+            support = np.min(current_window_low)
+            lower_highs = all(
+                current_window_high[j] < current_window_high[j - 1] for j in range(1, len(current_window_high)))
+
+            if (lower_highs and
+                    np.std(current_window_low) < 0.005 * support and
+                    current_window_close[-1] < support):
+                new_columns['triangle_descending'][i] = 1
+
+            # 6. Восходящий клин (Rising Wedge)
+            if (all(current_window_high[j] > current_window_high[j - 1] for j in range(1, len(current_window_high))) and
+                    all(current_window_low[j] > current_window_low[j - 1] for j in
+                        range(1, len(current_window_low))) and
+                    (current_window_close[-1] < current_window_low[-1])):
+                new_columns['wedge_rising'][i] = 1
+
+            # 7. Нисходящий клин (Falling Wedge)
+            if (all(current_window_high[j] < current_window_high[j - 1] for j in range(1, len(current_window_high))) and
+                    all(current_window_low[j] < current_window_low[j - 1] for j in
+                        range(1, len(current_window_low))) and
+                    (current_window_close[-1] > current_window_high[-1])):
+                new_columns['wedge_falling'][i] = 1
+
+        # Конвертируем словарь в DataFrame и объединяем с основным
+        new_columns_df = pd.DataFrame(new_columns)
+        self.df = pd.concat([self.df, new_columns_df], axis=1)
 
     # Приватные методы для работы только с внутренним датафреймом
     def _add_time_features_to_df(self) -> None:
@@ -127,28 +233,39 @@ class CryptoModelTrainer:
 
     def _add_technical_indicators_to_df(self) -> None:
         """Добавление технических индикаторов к внутреннему датафрейму"""
-        macd = MACD(close=self.df['close'], window_slow=26, window_fast=12, window_sign=9)
-        self.df['macd'] = macd.macd()
-        self.df['macd_signal'] = macd.macd_signal()
-        self.df['macd_diff'] = macd.macd_diff()
+        # Создаем временный словарь для новых колонок
+        new_columns = {}
 
-        self.df['obv'] = OnBalanceVolumeIndicator(
+        # MACD
+        macd = MACD(close=self.df['close'], window_slow=26, window_fast=12, window_sign=9)
+        new_columns['macd'] = macd.macd()
+        new_columns['macd_signal'] = macd.macd_signal()
+        new_columns['macd_diff'] = macd.macd_diff()
+
+        # OBV
+        new_columns['obv'] = OnBalanceVolumeIndicator(
             close=self.df['close'],
             volume=self.df['volume']
         ).on_balance_volume()
 
+        # Добавляем индикаторы для каждого окна
         for window in TRAINING_CONFIG['windows']:
-            self.df[f'sma_{window}'] = SMAIndicator(close=self.df['close'], window=window).sma_indicator()
-            self.df[f'ema_{window}'] = EMAIndicator(close=self.df['close'], window=window).ema_indicator()
-            self.df[f'rsi_{window}'] = RSIIndicator(close=self.df['close'], window=window).rsi()
+            new_columns[f'sma_{window}'] = SMAIndicator(close=self.df['close'], window=window).sma_indicator()
+            new_columns[f'ema_{window}'] = EMAIndicator(close=self.df['close'], window=window).ema_indicator()
+            new_columns[f'rsi_{window}'] = RSIIndicator(close=self.df['close'], window=window).rsi()
 
             bb = BollingerBands(close=self.df['close'], window=window)
-            self.df[f'bb_bbm_{window}'] = bb.bollinger_mavg()
-            self.df[f'bb_bbh_{window}'] = bb.bollinger_hband()
-            self.df[f'bb_bbl_{window}'] = bb.bollinger_lband()
+            new_columns[f'bb_bbm_{window}'] = bb.bollinger_mavg()
+            new_columns[f'bb_bbh_{window}'] = bb.bollinger_hband()
+            new_columns[f'bb_bbl_{window}'] = bb.bollinger_lband()
 
-            self.df[f'obv_ma_{window}'] = self.df['obv'].rolling(window=window).mean()
+            new_columns[f'obv_ma_{window}'] = new_columns['obv'].rolling(window=window).mean()
 
+        # Конвертируем словарь в DataFrame и объединяем с основным
+        new_columns_df = pd.DataFrame(new_columns)
+        self.df = pd.concat([self.df, new_columns_df], axis=1)
+
+        # Заполняем пропуски
         self.df = self.df.bfill().ffill().dropna()
 
         if len(self.df) == 0:
@@ -510,7 +627,7 @@ class CryptoModelTrainer:
 
 if __name__ == "__main__":
     trainer = CryptoModelTrainer()
-    # trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
-    #                                  model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
-    trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
-                                    model_folder=os.path.join('models', f"16-05-2025 23-38-34"))
+    trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
+                                      model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+    # trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
+    #                                 model_folder=os.path.join('models', f"16-05-2025 23-38-34"))

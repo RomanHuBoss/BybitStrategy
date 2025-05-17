@@ -7,14 +7,6 @@ from urllib.parse import urljoin
 def download_and_extract_zip_files(base_url, currency_pair, period, timeframe, start_year, start_month, start_day, output_folder):
     """
     Скачивает и распаковывает ZIP-файлы с указанного месяца и года до текущего.
-
-    :param base_url: Базовый URL сайта с файлами
-    :param currency_pair: Код валютной пары (например, 'BTCSTUSDT')
-    :period: период, за который информация сохраняется в файлы (daily - ежедневно, monthly - ежемесячно)
-    :param timeframe: Таймфрейм (например, '1m')
-    :param start_year: Год начала скачивания
-    :param start_month: Месяц начала скачивания
-    :param output_folder: Папка для сохранения распакованных файлов
     """
 
     def download_unpack_and_save(zip_url, zip_path, extracted_folder_path, extracted_filename):
@@ -81,7 +73,7 @@ def download_and_extract_zip_files(base_url, currency_pair, period, timeframe, s
                 extracted_filename = zip_filename = f"{currency_pair}-{timeframe}-{year}-{month:02d}.zip"
                 zip_url = base_url + zip_internal_folder + zip_filename
                 zip_path = os.path.join(output_folder, currency_pair, zip_filename)
-                extracted_folder_path = os.path.join(output_folder, currency_pair, period)
+                extracted_folder_path = os.path.join(output_folder, currency_pair, timeframe, period)
                 download_unpack_and_save(zip_url, zip_path, extracted_folder_path, extracted_filename)
             else:
                 # Формируем имя файла для ежедневной статистики
@@ -95,7 +87,7 @@ def download_and_extract_zip_files(base_url, currency_pair, period, timeframe, s
                     extracted_filename = zip_filename = f"{currency_pair}-{timeframe}-{year}-{month:02d}-{day:02d}.zip"
                     zip_url = base_url + zip_internal_folder + zip_filename
                     zip_path = os.path.join(output_folder, currency_pair, zip_filename)
-                    extracted_folder_path = os.path.join(output_folder, currency_pair, period)
+                    extracted_folder_path = os.path.join(output_folder, currency_pair, timeframe, period)
                     download_unpack_and_save(zip_url, zip_path, extracted_folder_path, extracted_filename)
 
 # Пример использования
@@ -105,7 +97,7 @@ if __name__ == "__main__":
     BASE_URL = "https://data.binance.vision/data/futures/um"  # Замените на реальный URL
     PERIOD = "daily" # daily or monthly
     CURRENCY_PAIR = "BTCUSDT"
-    TIMEFRAME = "1m"
+    TIMEFRAME = "3m"
     START_YEAR = 2023
     START_MONTH = 1
     START_DAY = 1
