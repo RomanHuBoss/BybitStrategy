@@ -10,7 +10,7 @@ from services.bybit_candles_handlers import bybit_candles_to_csv
 """
 Эта балалайка запрашивает с биржи Bybit данные о торговле конкретной криптовалютной парой с текущего момента времени и до момента в прошлом, определяемого
 Как это работает:   
-    http://127.0.0.1:8000/prognosis/?symbol=BTCUSDT&candles_num=5
+    http://127.0.0.1:8000/prognosis/?symbol=BTCUSDT&timeframe=3&candles_num=200
     Единственный эндпоинт /prognosis/ принимает:
         symbol (строка) - торговый символ
         timeframe - таймфрейм (1, 5, 15 минут и т.д.)

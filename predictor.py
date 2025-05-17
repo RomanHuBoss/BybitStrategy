@@ -432,5 +432,5 @@ if __name__ == "__main__":
 
     prediction = predictor.run_csv_prediction_pipeline(
         #csv_path=os.path.join("historical_data", "BTCUSDT", "3m", "daily", "BTCUSDT-3m-2025-05-05.csv"),
-        csv_path=os.path.join("downloads", "OBTUSDT_3m_2025-05-17-20-31.csv"),
+        csv_path=os.path.join("downloads", "FUSDT_3m_2025-05-17-21-42.csv"),
     )
