@@ -1,1 +1,0 @@
-["open", "high", "low", "close", "volume", "month_sin", "month_cos", "day_sin", "day_cos", "hour_sin", "hour_cos", "sma_10", "ema_10", "rsi_10", "bb_bbm_10", "bb_bbh_10", "bb_bbl_10", "sma_20", "ema_20", "rsi_20", "bb_bbm_20", "bb_bbh_20", "bb_bbl_20", "macd", "macd_signal", "macd_diff", "obv", "obv_ma_10", "obv_ma_20"]
