@@ -33,8 +33,7 @@ import time
         Указаны возможные коды ответов (200, 400, 404)
 """
 
-model_folder = os.path.join("models", "3m-60forward-10backward-17-05-2025 22-17-14")
-
+model_folder = os.path.join("models", "3m-30backward-90forward-18-05-2025 13-36-36")
 app = FastAPI()
 bybit_symbols = BybitSymbolsList()
 predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.6)
@@ -65,7 +64,7 @@ class ErrorResponse(BaseModel):
     400: {"model": ErrorResponse},
     404: {"description": "Not found"},
 })
-async def get_prognosis(timeframe: int, candles_num: int):
+async def get_prognosis(timeframe: int, candles_num: int, symbol:Optional[str] = None):
     """
     prognosis_cache = {
         symbol_name: {
@@ -76,18 +75,37 @@ async def get_prognosis(timeframe: int, candles_num: int):
     """
 
     symbols_list = bybit_symbols.get_bybit_symbols_list(limit=1000)
-    for symbol in symbols_list:
-        last_update = None
-        if symbol in prognosis_cache:
-            last_update = prognosis_cache[symbol]['last_update'] if symbol in prognosis_cache and 'last_update' in prognosis_cache[symbol] else None
+    current_time = int(time.time())
 
-        if last_update is None or last_update < int(time.time()) - 60:
-            df = bybit_candles_to_df(await get_candles(symbol, timeframe, candles_num))
-            symbol_prognosis = predictor.run_prediction_pipeline(df)
-            prognosis_cache[symbol] = {
-                'last_update': int(time.time()),
-                'symbol_prognosis': symbol_prognosis,
-            }
+    for tmp_symbol in symbols_list:
+        if symbol and symbol != tmp_symbol:
+            continue
+
+        # Получаем данные из кеша, если они есть
+        cached_data = prognosis_cache.get(tmp_symbol, {})
+        last_update = cached_data.get('last_update')
+
+        # Если данные устарели или отсутствуют, обновляем
+        if last_update is None or last_update < current_time - 60:
+            try:
+                df = bybit_candles_to_df(await get_candles(tmp_symbol, timeframe, candles_num))
+                symbol_prognosis = predictor.run_prediction_pipeline(df)
+
+                # Обновляем кеш только если получили прогноз
+                if symbol_prognosis:  # Проверяем, что прогноз не пустой
+                    prognosis_cache[tmp_symbol] = {
+                        'last_update': current_time,
+                        'symbol_prognosis': symbol_prognosis,
+                    }
+                elif tmp_symbol in prognosis_cache:
+                    # Удаляем устаревшие пустые прогнозы
+                    del prognosis_cache[tmp_symbol]
+
+            except Exception as e:
+                print(f"Error processing symbol {tmp_symbol}: {str(e)}")
+                continue
+
+    # Фильтруем оставшиеся пустые прогнозы (на случай, если они были добавлены ранее)
 
     return prognosis_cache
 

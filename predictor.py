@@ -464,9 +464,8 @@ class CryptoModelPredictor:
         result = {}
 
         for direction in ['long', 'short']:
-            result[direction] = {}
-
             if any(prob > self.threshold for prob in prediction[direction].values()):
+                result[direction] = {}
                 result[direction]['open_time'] = self.df['open_time'].iloc[-1]
                 result[direction]['pairs'] = []
                 if debug:
@@ -485,7 +484,7 @@ class CryptoModelPredictor:
                 }
 
                 result[direction]['median_sl_tp'] = {
-                    "SL": f"{prediction['median_values'][direction]['median_sl']}",
+                    "SL": f"{prediction['median_values'][direction]['median_sl']:.2%}",
                     "TP": f"{prediction['median_values'][direction]['median_tp']:.2%}",
                 }
 
