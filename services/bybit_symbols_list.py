@@ -12,7 +12,7 @@ class BybitSymbolsList:
         self.symbols_list = []
         self.last_update = None
 
-    def get_bybit_symbols_list(self):
+    def get_bybit_symbols_list(self, limit):
         """
         Получить информацию о символах ByBit
         """
@@ -23,10 +23,10 @@ class BybitSymbolsList:
 
             bybit_data = session.get_instruments_info(
                 category="linear",
-                limit=1000,
+                limit=limit,
             )
 
-            if self.last_update is None or self.last_update > 1000 * 60:
+            if self.last_update is None or self.last_update < int(time.time()) - 1000 * 60:
                 self.symbols_list = []
                 for symbol_data in bybit_data['result']['list']:
                     self.symbols_list.append(symbol_data['symbol'])

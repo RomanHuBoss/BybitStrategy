@@ -106,7 +106,24 @@ class CryptoModelPredictor:
         self.scaler.min_ = np.load(os.path.join(model_folder, 'scaler_min.npy'))
         self.scaler.scale_ = np.load(os.path.join(model_folder, 'scaler_scale.npy'))
 
-    def load_trading_data_from_csv(self, file_path: str) -> None:
+    def load_trading_data_from_df(self, df, debug=False) -> None:
+        """Загружает и очищает данные из CSV"""
+        try:
+            self.df = df
+            self.df['open_time'] = pd.to_datetime(pd.to_numeric(self.df['open_time']), unit='ms')
+            cols_to_drop = [col for col in [
+                'close_time', 'quote_volume', 'count',
+                'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'
+            ] if col in self.df.columns]
+            self.df.drop(cols_to_drop, axis=1, inplace=True)
+            if debug:
+                print(f"Данные загружены. Строк: {len(self.df)}")
+        except Exception as e:
+            if debug:
+                print(f"Ошибка загрузки: {str(e)}")
+            raise
+
+    def load_trading_data_from_csv(self, file_path: str, debug=False) -> None:
         """Загружает и очищает данные из CSV"""
         try:
             self.df = pd.read_csv(file_path)
@@ -116,9 +133,11 @@ class CryptoModelPredictor:
                 'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'
             ] if col in self.df.columns]
             self.df.drop(cols_to_drop, axis=1, inplace=True)
-            print(f"Данные загружены. Строк: {len(self.df)}")
+            if debug:
+                print(f"Данные загружены. Строк: {len(self.df)}")
         except Exception as e:
-            logger.error(f"Ошибка загрузки: {str(e)}")
+            if debug:
+                print(f"Ошибка загрузки: {str(e)}")
             raise
 
     def create_features(self) -> None:
@@ -378,9 +397,10 @@ class CryptoModelPredictor:
         active_patterns = {name: active for name, active in patterns.items() if active}
         return active_patterns
 
-    def run_csv_prediction_pipeline(self, csv_path: str) -> Dict:
+    def run_csv_prediction_pipeline(self, csv_path: str, debug=False) -> Dict:
         """Полный цикл прогнозирования"""
-        print(f"Запуск прогноза для {csv_path}")
+        if debug:
+            print(f"Запуск прогноза для {csv_path}")
 
         self.load_trading_data_from_csv(csv_path)
         self.create_features()
@@ -399,14 +419,77 @@ class CryptoModelPredictor:
 
             for direction in ['long', 'short']:
                 if any(prob > self.threshold for prob in prediction[direction].values()):
+                    if debug:
+                        print('---')
+                        print(f"Результаты для {direction}:")
+                        print(f"Свеча от даты {self.df['open_time'].iloc[-1]}")
+
+                    for strat, prob in prediction[direction].items():
+                        if prob > self.threshold:
+                            if debug:
+                                print(f"{strat}: {prob:.2%}")
+
+                    if debug:
+                        print(f"Максимальные значения (prob > {self.threshold * 100}%):")
+                        print(
+                            f"{direction}: SL={prediction['max_values'][direction]['max_sl']:.2%}, TP={prediction['max_values'][direction]['max_tp']:.2%}")
+
+                        print(f"Медианные значения (prob > {self.threshold * 100}%):")
+                        print(
+                            f"{direction}: SL={prediction['median_values'][direction]['median_sl']:.2%}, TP={prediction['median_values'][direction]['median_tp']:.2%}")
+
+                    #Выводим обнаруженные паттерны
+                    if prediction['chart_patterns']:
+                        if debug:
+                            print("\nОбнаруженные графические паттерны:")
+                        for pattern, active in prediction['chart_patterns'].items():
+                            if active:
+                                if debug:
+                                    print(f"- {pattern}")
+                    else:
+                        if debug:
+                            print("\nГрафические паттерны не обнаружены")
+
+
+    def run_prediction_pipeline(self, df, debug=False) -> Dict:
+        """Полный цикл прогнозирования"""
+        if debug:
+            print(f"Запуск прогноза для переданного датафрейма")
+
+        self.load_trading_data_from_df(df)
+        self.create_features()
+
+        prediction = self.predict_last_candles()
+
+        result = {}
+
+        for direction in ['long', 'short']:
+            result[direction] = {}
+
+            if any(prob > self.threshold for prob in prediction[direction].values()):
+                result[direction]['open_time'] = self.df['open_time'].iloc[-1]
+                result[direction]['pairs'] = []
+                if debug:
                     print('---')
                     print(f"Результаты для {direction}:")
                     print(f"Свеча от даты {self.df['open_time'].iloc[-1]}")
 
-                    for strat, prob in prediction[direction].items():
-                        if prob > self.threshold:
-                            print(f"{strat}: {prob:.2%}")
+                for strat, prob in prediction[direction].items():
+                    if prob > self.threshold:
+                        result[direction]['pairs'].append(f"{strat}: {prob:.2%}")
+                        print(f"{strat}: {prob:.2%}")
 
+                result[direction]['max_sl_tp'] = {
+                    "SL": f"{prediction['max_values'][direction]['max_sl']:.2%}",
+                    "TP": f"{prediction['max_values'][direction]['max_tp']:.2%}",
+                }
+
+                result[direction]['median_sl_tp'] = {
+                    "SL": f"{prediction['median_values'][direction]['median_sl']}",
+                    "TP": f"{prediction['median_values'][direction]['median_tp']:.2%}",
+                }
+
+                if debug:
                     print(f"Максимальные значения (prob > {self.threshold * 100}%):")
                     print(
                         f"{direction}: SL={prediction['max_values'][direction]['max_sl']:.2%}, TP={prediction['max_values'][direction]['max_tp']:.2%}")
@@ -415,22 +498,33 @@ class CryptoModelPredictor:
                     print(
                         f"{direction}: SL={prediction['median_values'][direction]['median_sl']:.2%}, TP={prediction['median_values'][direction]['median_tp']:.2%}")
 
-                    #Выводим обнаруженные паттерны
-                    if prediction['chart_patterns']:
+                #Выводим обнаруженные паттерны
+                result['chart_patterns'] = []
+
+                if prediction['chart_patterns']:
+                    if debug:
                         print("\nОбнаруженные графические паттерны:")
-                        for pattern, active in prediction['chart_patterns'].items():
-                            if active:
+
+                    for pattern, active in prediction['chart_patterns'].items():
+                        if active:
+                            result['chart_patterns'].append(pattern)
+                            if debug:
                                 print(f"- {pattern}")
-                    else:
+                else:
+                    if debug:
                         print("\nГрафические паттерны не обнаружены")
+
+        return result
 
 
 if __name__ == "__main__":
     model_folder = os.path.join("models", "3m-60forward-10backward-17-05-2025 22-17-14")
     predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.6)
+    df = pd.read_csv(os.path.join("downloads", "1000000BABYDOGEUSDT_3m_2025-05-18-09-29.csv"))
+    print(predictor.run_prediction_pipeline(df))
 
 
-    prediction = predictor.run_csv_prediction_pipeline(
-        #csv_path=os.path.join("historical_data", "BTCUSDT", "3m", "daily", "BTCUSDT-3m-2025-05-05.csv"),
-        csv_path=os.path.join("downloads", "FUSDT_3m_2025-05-17-21-42.csv"),
-    )
+    # prediction = predictor.run_csv_prediction_pipeline(
+    #     #csv_path=os.path.join("historical_data", "BTCUSDT", "3m", "daily", "BTCUSDT-3m-2025-05-05.csv"),
+    #     csv_path=os.path.join("downloads", "1000000BABYDOGEUSDT_3m_2025-05-18-09-29.csv"),
+    # )
