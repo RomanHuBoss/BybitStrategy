@@ -26,7 +26,7 @@ class BybitSymbolsList:
                 limit=limit,
             )
 
-            if self.last_update is None or self.last_update < int(time.time()) - 1000 * 60:
+            if self.last_update is None or self.last_update < int(time.time()) - 60 * 60 * 24:
                 self.symbols_list = []
                 for symbol_data in bybit_data['result']['list']:
                     self.symbols_list.append(symbol_data['symbol'])

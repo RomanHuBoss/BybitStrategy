@@ -623,7 +623,12 @@ class CryptoModelTrainer:
 
 if __name__ == "__main__":
     trainer = CryptoModelTrainer()
-    # trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
-    #                                   model_folder=os.path.join('models', f"{datetime.now():%d-%m-%Y %H-%M-%S}"))
+
+    model_folder = os.path.join('models',
+            f"{TRAINING_CONFIG['timeframe']}m-{TRAINING_CONFIG['backward_window']}backward-{TRAINING_CONFIG['forward_window']}forward-{datetime.now():%d-%m-%Y %H-%M-%S}"
+    )
+
+    trainer.run_training_pipeline(csv_path=TRAINING_CONFIG['training_csv_file'],
+                                      model_folder=model_folder)
     trainer.run_evaluating_pipeline(csv_path=TRAINING_CONFIG['evaluating_csv_file'],
-                                     model_folder=os.path.join('models', f"3m-60forward-10backward-17-05-2025 22-17-14"))
+                                     model_folder=model_folder)

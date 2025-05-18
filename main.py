@@ -75,12 +75,13 @@ async def get_prognosis(timeframe: int, candles_num: int):
     }
     """
 
-    for symbol in bybit_symbols.get_bybit_symbols_list(limit=1000):
+    symbols_list = bybit_symbols.get_bybit_symbols_list(limit=1000)
+    for symbol in symbols_list:
         last_update = None
         if symbol in prognosis_cache:
             last_update = prognosis_cache[symbol]['last_update'] if symbol in prognosis_cache and 'last_update' in prognosis_cache[symbol] else None
 
-        if last_update is None or last_update < int(time.time()) - 1000 * 60:
+        if last_update is None or last_update < int(time.time()) - 60:
             df = bybit_candles_to_df(await get_candles(symbol, timeframe, candles_num))
             symbol_prognosis = predictor.run_prediction_pipeline(df)
             prognosis_cache[symbol] = {
