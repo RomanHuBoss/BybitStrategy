@@ -36,7 +36,7 @@ import time
 model_folder = os.path.join("models", "3m-30backward-90forward-18-05-2025 13-36-36")
 app = FastAPI()
 bybit_symbols = BybitSymbolsList()
-predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.6)
+predictor = CryptoModelPredictor(model_folder=model_folder, threshold=0.65)
 prognosis_cache = {}
 
 
