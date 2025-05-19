@@ -78,15 +78,15 @@ async def get_prognosis(timeframe: int, candles_num: int, symbol:Optional[str] =
     current_time = int(time.time())
 
     for tmp_symbol in symbols_list:
-        if symbol and symbol != tmp_symbol:
+        if symbol is not None and symbol != tmp_symbol:
             continue
 
         # Получаем данные из кеша, если они есть
         cached_data = prognosis_cache.get(tmp_symbol, {})
-        last_update = cached_data.get('last_update')
+        last_update = cached_data.get('last_update', -1)
 
         # Если данные устарели или отсутствуют, обновляем
-        if last_update is None or last_update < current_time - 60:
+        if last_update == -1 or last_update < current_time - 60:
             try:
                 df = bybit_candles_to_df(await get_candles(tmp_symbol, timeframe, candles_num))
                 symbol_prognosis = predictor.run_prediction_pipeline(df)
@@ -105,7 +105,8 @@ async def get_prognosis(timeframe: int, candles_num: int, symbol:Optional[str] =
                 print(f"Error processing symbol {tmp_symbol}: {str(e)}")
                 continue
 
-    # Фильтруем оставшиеся пустые прогнозы (на случай, если они были добавлены ранее)
+    if symbol is not None:
+        return prognosis_cache.get(symbol, {})
 
     return prognosis_cache
 
