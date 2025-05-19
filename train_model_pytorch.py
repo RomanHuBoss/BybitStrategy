@@ -562,7 +562,7 @@ class CryptoModelTrainer:
                 loss = criterion(outputs, targets)
                 total_loss += loss.item() * inputs.size(0)
 
-                predicted = (outputs > 0.5).float()
+                predicted = (outputs >= 0.6).float()
 
                 for i in range(len(TRAINING_CONFIG['percentage_pairs'])):
                     correct_per_pair[i] += (predicted[:, :, i] == targets[:, :, i]).sum()
